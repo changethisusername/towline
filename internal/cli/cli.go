@@ -11,7 +11,7 @@ func Run(args []string) error {
 
 	switch args[0] {
 	case "setup":
-		return fmt.Errorf("not yet implemented")
+		return runSetup(args[1:])
 	case "init":
 		return fmt.Errorf("not yet implemented")
 	case "list":
