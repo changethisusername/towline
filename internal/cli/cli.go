@@ -17,7 +17,7 @@ func Run(args []string) error {
 	case "list":
 		return runList(args[1:])
 	case "destroy":
-		return fmt.Errorf("not yet implemented")
+		return runDestroy(args[1:])
 	case "promote":
 		return fmt.Errorf("not yet implemented")
 	case "rotate-keys":
