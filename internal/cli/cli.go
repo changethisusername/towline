@@ -19,11 +19,11 @@ func Run(args []string) error {
 	case "destroy":
 		return runDestroy(args[1:])
 	case "promote":
-		return fmt.Errorf("not yet implemented")
+		return runPromote(args[1:])
 	case "rotate-keys":
-		return fmt.Errorf("not yet implemented")
+		return runRotateKeys(args[1:])
 	case "status":
-		return fmt.Errorf("not yet implemented")
+		return runStatus(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
