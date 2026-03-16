@@ -11,6 +11,25 @@ Towline is an open-source framework that gives AI coding agents safe, project-sc
 
 The core principle: a new project should go from idea to "agent with full isolated deploy access" in under 60 seconds with zero manual configuration.
 
+## Build & Test
+
+```bash
+make build          # Build both binaries to dist/
+make build-mcp      # Build only towline-mcp
+make build-cli      # Build only towline CLI
+make test           # Run unit tests
+make test-coverage  # Tests with coverage report
+make vet            # Go vet
+make fmt            # gofmt
+```
+
+## Code style
+
+- Follow upstream Portainer MCP conventions: PascalCase exported, camelCase unexported
+- Error handling: `fmt.Errorf("failed to X: %w", err)`
+- Table-driven tests with descriptive case names
+- Functional options pattern for configurable types
+
 ## Architecture
 
 ### Two-component design
