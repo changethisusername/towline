@@ -1,0 +1,202 @@
+---
+version: v1.0.0
+tools:
+  - name: towline_service_health
+    description: >
+      Get health snapshot for one or all services in the stack: state, uptime,
+      restart count, CPU/memory usage, and exit code.
+    parameters:
+      - name: service
+        description: Service name from docker-compose. If omitted, returns all services.
+        type: string
+    annotations:
+      title: Service Health
+      readOnlyHint: true
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_service_logs
+    description: >
+      Fetch recent log output for a named service. Strips Docker binary framing headers.
+    parameters:
+      - name: service
+        description: Service name from docker-compose
+        type: string
+        required: true
+      - name: tail
+        description: Number of lines to return (default 200)
+        type: number
+      - name: since
+        description: Only return logs after this RFC3339 timestamp
+        type: string
+      - name: filter
+        description: Filter log lines containing this string
+        type: string
+    annotations:
+      title: Service Logs
+      readOnlyHint: true
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_env_get
+    description: >
+      Read stack environment variables. Sensitive values (names containing KEY,
+      SECRET, PASSWORD, TOKEN) are masked.
+    parameters:
+      - name: name
+        description: Specific variable name to read. If omitted, returns all variables.
+        type: string
+    annotations:
+      title: Get Environment Variables
+      readOnlyHint: true
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_env_set
+    description: >
+      Set a stack environment variable. Service restart may be needed.
+      In prod tier, requires approval.
+    parameters:
+      - name: name
+        description: Variable name
+        type: string
+        required: true
+      - name: value
+        description: Variable value
+        type: string
+        required: true
+      - name: approvalToken
+        description: Approval token for prod tier operations
+        type: string
+    annotations:
+      title: Set Environment Variable
+      readOnlyHint: false
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_domains_list
+    description: >
+      List all domain/routing mappings for services in the stack.
+    annotations:
+      title: List Domains
+      readOnlyHint: true
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_domains_add
+    description: >
+      Add domain routing to a service. Supports Traefik (labels), Caddy (admin API),
+      or Cloudflare Tunnels (returns instructions for Cloudflare MCP).
+    parameters:
+      - name: service
+        description: Service name from docker-compose
+        type: string
+        required: true
+      - name: domain
+        description: Domain name to route (e.g. app.example.com)
+        type: string
+        required: true
+      - name: port
+        description: Service port (default 80)
+        type: number
+      - name: method
+        description: Proxy method. Auto-detected if omitted.
+        type: string
+        enum:
+          - traefik
+          - caddy
+          - cloudflare
+      - name: approvalToken
+        description: Approval token for prod tier operations
+        type: string
+    annotations:
+      title: Add Domain
+      readOnlyHint: false
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: true
+
+  - name: towline_domains_remove
+    description: >
+      Remove domain routing from a service.
+    parameters:
+      - name: service
+        description: Service name from docker-compose
+        type: string
+        required: true
+      - name: domain
+        description: Domain name to remove
+        type: string
+        required: true
+      - name: approvalToken
+        description: Approval token for prod tier operations
+        type: string
+    annotations:
+      title: Remove Domain
+      readOnlyHint: false
+      destructiveHint: true
+      idempotentHint: true
+      openWorldHint: true
+
+  - name: towline_scale
+    description: >
+      Scale a service to N replicas. Warns if the service has persistent volumes.
+    parameters:
+      - name: service
+        description: Service name from docker-compose
+        type: string
+        required: true
+      - name: replicas
+        description: Number of replicas
+        type: number
+        required: true
+      - name: approvalToken
+        description: Approval token for prod tier operations
+        type: string
+    annotations:
+      title: Scale Service
+      readOnlyHint: false
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_deployments
+    description: >
+      View deployment history with diffs and outcomes.
+    parameters:
+      - name: limit
+        description: Maximum number of entries to return (default 10)
+        type: number
+    annotations:
+      title: Deployment History
+      readOnlyHint: true
+      destructiveHint: false
+      idempotentHint: true
+      openWorldHint: false
+
+  - name: towline_exec
+    description: >
+      Execute a command inside a running container.
+    parameters:
+      - name: service
+        description: Service name from docker-compose
+        type: string
+        required: true
+      - name: command
+        description: Command to execute (string or space-separated)
+        type: string
+        required: true
+      - name: approvalToken
+        description: Approval token for prod tier operations
+        type: string
+    annotations:
+      title: Execute Command
+      readOnlyHint: false
+      destructiveHint: false
+      idempotentHint: false
+      openWorldHint: false

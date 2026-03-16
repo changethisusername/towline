@@ -1,7 +1,9 @@
 dist/
 coverage.out
 tools.yaml
+!internal/tooldef/tools.yaml
 towline-tools.yaml
+!internal/tooldef/towline-tools.yaml
 *.key
 .env
 .env.*
