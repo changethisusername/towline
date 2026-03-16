@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "towline-{{.Tier}}": {
+      "command": "{{.MCPBinaryPath}}",
+      "args": [
+        "-server", "{{.PortainerURL}}",
+        "-token", "{{.APIToken}}",
+        "-stack", "{{.StackName}}",
+        "-tier", "{{.Tier}}",
+        "-disable-version-check"
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# {{.ProjectName}}
+
+This project is managed by Towline. You have access to a scoped Portainer MCP
+server that gives you full control over the **{{.StackName}}** stack in
+**{{.Tier}}** tier.
+
+## Infrastructure
+
+- **Stack**: {{.StackName}}
+- **Tier**: {{.Tier}}
+- **Portainer**: {{.PortainerURL}}
+- **Environment ID**: {{.EnvironmentID}}
+
+## DevOps skill
+
+Read `skills/towline-devops.md` for complete documentation on available MCP
+tools and operational decision frameworks. Always consult it before performing
+infrastructure operations.
+
+## Key rules
+
+1. **Always read the current compose file** before modifying it. Submit the
+   COMPLETE file to avoid removing services.
+2. **Set environment variables before deploying** services that need them.
+3. **Diagnose before restarting** — read logs first, understand the root cause.
+4. **Include descriptions** with every deployment for audit trail.
+{{if eq .Tier "prod"}}
+5. **Production tier**: destructive and configuration-changing operations
+   require your human partner's approval. Follow the approval flow.
+{{end}}

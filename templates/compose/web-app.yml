@@ -1,0 +1,20 @@
+services:
+  app:
+    image: "${APP_IMAGE:-nginx:alpine}"
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+      - redis
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: "${DB_NAME:-app}"
+      POSTGRES_USER: "${DB_USER:-app}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+  redis:
+    image: redis:7-alpine
+volumes:
+  db_data:
