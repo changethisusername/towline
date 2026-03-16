@@ -45,7 +45,10 @@ towline/
 │   │   ├── traefik.go
 │   │   ├── caddy.go
 │   │   └── cloudflare.go
-│   ├── tooldef/                   # Upstream + towline tool definitions
+│   ├── tooldef/                   # Tool definitions
+│   │   ├── tooldef.go             #   Upstream embed + file creation
+│   │   ├── tools.yaml             #   Upstream tool definitions (48 tools)
+│   │   └── towline-tools.yaml     #   Towline tool definitions (towline_* tools)
 │   └── cli/                       # CLI command implementations
 │       ├── setup.go
 │       ├── init.go
@@ -202,7 +205,7 @@ Applies only to Docker proxy calls targeting a specific container (container ID 
 
 ## 3. towline-mcp — New tool handlers
 
-Towline tools are defined in `internal/tooldef/towline-tools.yaml`. At server construction, both YAML files are loaded separately via `toolgen.LoadToolsFromYAML` and the resulting maps are merged into a single `map[string]mcp.Tool` before the server is initialized. Towline tool names are prefixed with `towline_` to avoid collisions with upstream tool names. They operate against the scoped stack and accept service names (from docker-compose), not container IDs.
+Towline tools are defined in `internal/tooldef/towline-tools.yaml`. At server construction, both YAML files are loaded separately via `toolgen.LoadToolsFromYAML` and the resulting maps are merged into a single `map[string]mcp.Tool` before the server is initialized. Towline tool names are prefixed with `towline_` to avoid collisions with upstream tool names. The `towline-tools.yaml` must use the same `v`-prefixed semver version format as the upstream `tools.yaml` (e.g., `version: v1.0`) since `LoadToolsFromYAML` validates with `semver.IsValid()`. They operate against the scoped stack and accept service names (from docker-compose), not container IDs.
 
 **Service name resolution**: query Docker API filtered by `com.docker.compose.project=<stack>` and `com.docker.compose.service=<service>` labels to resolve service name to container ID(s).
 
@@ -287,7 +290,7 @@ Towline tools are defined in `internal/tooldef/towline-tools.yaml`. At server co
     }
   ]
   ```
-- **Implementation**: reads from `towline-{stack}-data:/towline/deployments.json` Docker volume.
+- **Implementation**: reads from `_TOWLINE_DEPLOYMENTS` stack environment variable (see section 6).
 
 ### towline_exec
 
