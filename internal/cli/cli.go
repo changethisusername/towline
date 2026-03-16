@@ -13,7 +13,7 @@ func Run(args []string) error {
 	case "setup":
 		return runSetup(args[1:])
 	case "init":
-		return fmt.Errorf("not yet implemented")
+		return runInit(args[1:])
 	case "list":
 		return fmt.Errorf("not yet implemented")
 	case "destroy":
