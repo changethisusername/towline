@@ -10,7 +10,7 @@ Towline gives AI coding agents safe, project-scoped access to deploy and manage 
 2. **towline CLI** — Go binary. Scaffolds projects with Portainer teams, API keys, stacks, and agent configuration.
 3. **DevOps skill** — Markdown file. Teaches agents how to think about operations and use the MCP effectively.
 
-**Target compatibility**: Portainer CE 2.39.0 LTS, Go module `github.com/changethisusername/towline`.
+**Target compatibility**: Portainer CE 2.39.0 LTS, Go module `github.com/changethisusername/towline`. The upstream Portainer MCP v0.7.0 targets Portainer 2.31.2 (EE) with `client-api-go/v2 v2.31.2`. Towline updates the `SupportedPortainerVersion` constant and client SDK to target CE 2.39.0 LTS. The local stack and Docker proxy APIs are identical between CE and EE. The `-disable-version-check` flag defaults to `true` until the client SDK is verified against 2.39.0.
 
 ---
 
@@ -56,6 +56,7 @@ towline/
 │       └── status.go
 ├── pkg/
 │   ├── portainer/                 # Upstream Portainer client, models, utils
+│   ├── toolgen/                   # Upstream YAML tool loader + parameter parser
 │   └── config/                    # Towline global/project config types
 ├── skills/
 │   └── towline-devops.md          # DevOps skill (embedded + copied into projects)
@@ -95,7 +96,13 @@ build-cli:
 
 ### Upstream tracking
 
-Upstream Portainer MCP code lives in `internal/mcp/`, `internal/tooldef/`, and `pkg/portainer/`. An `upstream` branch tracks the unmodified Portainer MCP for clean merges. Only `cmd/towline-mcp/main.go` is modified from upstream.
+Upstream Portainer MCP code lives in `internal/mcp/`, `internal/tooldef/`, `pkg/portainer/`, and `pkg/toolgen/`. An `upstream` branch tracks the unmodified Portainer MCP for clean merges.
+
+**Upstream files modified** (minimal, merge-friendly):
+- `cmd/towline-mcp/main.go` — renamed from `cmd/portainer-mcp/mcp.go`. Adds new CLI flags and wires middleware.
+- `internal/mcp/server.go` — adds an exported `WrapTool` method and exports the `tools` map via a `Tools()` accessor, enabling middleware to wrap handlers at registration time without modifying handler code. The upstream `PortainerMCPServer` struct fields remain unexported; the new methods provide controlled access.
+
+All other upstream files are unmodified. New towline code lives entirely in new files/packages (`internal/middleware/`, `internal/towline/`, `internal/approval/`, `internal/proxy/`, `internal/cli/`, `pkg/config/`).
 
 ---
 
@@ -122,7 +129,7 @@ Tool call arrives (mcp-go dispatch)
         -> Original upstream handler
 ```
 
-Each middleware is a handler wrapper function with signature:
+Each middleware is a handler wrapper function with signature (`server` is `github.com/mark3labs/mcp-go/server` v0.32.0, the upstream MCP dependency):
 
 ```go
 type MiddlewareFunc func(server.ToolHandlerFunc) server.ToolHandlerFunc
@@ -143,9 +150,11 @@ func wrapHandler(handler server.ToolHandlerFunc, middlewares ...MiddlewareFunc) 
 
 `-stack <name>` scopes all operations to a single Portainer stack.
 
+**Stack name-to-ID resolution**: at startup, the middleware calls `GetLocalStacks()` to resolve the stack name to its integer ID. This mapping is cached and re-resolved on any "stack not found" error (handles stack recreation). If the named stack does not exist at startup (e.g., first deploy of a new project before `towline init` creates the stack), the middleware starts in "pending" mode — read operations return empty results, and the first `createLocalStack` call is allowed through unscoped. After creation, the mapping is established.
+
 **List operations** (listLocalStacks, Docker proxy container listings): post-filter responses to include only resources matching the stack name. For Docker proxy, filter by `com.docker.compose.project=<stack-name>` label.
 
-**Mutations** (updateLocalStack, deleteLocalStack, etc.): pre-validate that the target stack ID resolves to the scoped stack name. Reject with a clear error otherwise.
+**Mutations** (updateLocalStack, deleteLocalStack, etc.): pre-validate that the target stack ID matches the resolved scoped stack ID. Reject with a clear error otherwise.
 
 **Docker proxy non-list calls**: resolve the target container and check its `com.docker.compose.project` label before forwarding.
 
@@ -176,6 +185,8 @@ In `dev` tier, all calls pass through immediately. In `prod` tier:
 4. Middleware validates the token, clears it, forwards to the real handler.
 5. Expired or invalid tokens return a clear rejection.
 
+**Approval token as schema parameter**: every tool that can be gated in prod tier includes an optional `approvalToken` parameter in its YAML schema definition. This ensures MCP clients (Claude Code, Cursor, Gemini CLI) can include the token in tool calls without schema validation failures. The middleware checks for this parameter on every gated call.
+
 **Token store**: `sync.Map` of `token -> { toolName, args, createdAt }`. Background goroutine prunes expired tokens every 30 seconds.
 
 ### 2.3 Container ownership middleware
@@ -191,7 +202,7 @@ Applies only to Docker proxy calls targeting a specific container (container ID 
 
 ## 3. towline-mcp — New tool handlers
 
-All towline tools are defined in `internal/tooldef/towline-tools.yaml` and registered via the same `addToolIfExists` pattern as upstream. They operate against the scoped stack and accept service names (from docker-compose), not container IDs.
+Towline tools are defined in `internal/tooldef/towline-tools.yaml`. At server construction, both YAML files are loaded separately via `toolgen.LoadToolsFromYAML` and the resulting maps are merged into a single `map[string]mcp.Tool` before the server is initialized. Towline tool names are prefixed with `towline_` to avoid collisions with upstream tool names. They operate against the scoped stack and accept service names (from docker-compose), not container IDs.
 
 **Service name resolution**: query Docker API filtered by `com.docker.compose.project=<stack>` and `com.docker.compose.service=<service>` labels to resolve service name to container ID(s).
 
@@ -224,7 +235,7 @@ All towline tools are defined in `internal/tooldef/towline-tools.yaml` and regis
 ### towline_env_get
 
 - **Input**: optional `name` (string) to read a single variable
-- **Output**: JSON object of env vars. Values containing `KEY`, `SECRET`, `PASSWORD`, `TOKEN` (case-insensitive) are masked as `"****"`.
+- **Output**: JSON object of env vars. Variables whose **names** contain `KEY`, `SECRET`, `PASSWORD`, or `TOKEN` (case-insensitive) have their values masked as `"****"`.
 - **Implementation**: Portainer local stack API to read stack env vars.
 
 ### towline_env_set
@@ -258,7 +269,7 @@ All towline tools are defined in `internal/tooldef/towline-tools.yaml` and regis
 
 - **Input**: `service` (string), `replicas` (int)
 - **Output**: Confirmation. Warning if the service has volume mounts.
-- **Implementation**: reads compose, sets `deploy.replicas`, redeploys via `UpdateLocalStack`.
+- **Implementation**: reads compose via `GetLocalStackFile`, parses with `gopkg.in/yaml.v3` (already an upstream dependency), sets `deploy.replicas` on the target service, serializes back, redeploys via `UpdateLocalStack`. Note: standard YAML marshal/unmarshal strips comments and may reorder keys — this is acceptable since compose files managed by towline are machine-generated.
 - **Prod tier**: requires approval (classified as deploy).
 
 ### towline_deployments
@@ -282,7 +293,7 @@ All towline tools are defined in `internal/tooldef/towline-tools.yaml` and regis
 
 - **Input**: `service` (string), `command` (string or array)
 - **Output**: Command stdout/stderr.
-- **Implementation**: Docker proxy `POST /containers/{id}/exec` then `POST /exec/{execId}/start`.
+- **Implementation**: Docker exec via Portainer proxy is a two-step process. Step 1: `POST /containers/{id}/exec` with `AttachStdout: true, AttachStderr: true, Detach: false`. Step 2: `POST /exec/{execId}/start`. The exec start endpoint returns a hijacked TCP stream. Portainer's Docker proxy supports connection upgrades for exec. If hijack fails (some proxy configurations strip upgrade headers), fallback to `Detach: true` with `POST /exec/{execId}/json` to poll for completion and read output. The implementation should try the streaming approach first and fall back gracefully.
 - **Prod tier**: requires approval.
 
 ---
@@ -290,6 +301,8 @@ All towline tools are defined in `internal/tooldef/towline-tools.yaml` and regis
 ## 4. Towline CLI
 
 Go binary using standard library `flag` package. Subcommand dispatch.
+
+**Portainer API client**: the CLI needs Portainer API endpoints not exposed by the upstream SDK — specifically `POST /api/auth` (authentication), `POST /api/users/{id}/tokens` (API key generation), and user creation. The CLI implements its own lightweight HTTP client in `pkg/config/portainer_api.go` that makes direct REST calls using the admin API key. This is separate from the MCP's `PortainerClient` interface, which is designed for MCP handler use.
 
 ### towline setup
 
@@ -460,20 +473,22 @@ Towline does NOT call Cloudflare APIs directly. `towline_domains_add` with `meth
 
 ### Deployment log
 
-Stored as JSON in a Docker volume: `towline-{stack}-data:/towline/deployments.json`.
+Stored as Portainer stack environment variables on the stack itself. The deployment log is serialized as a JSON string in a reserved env var `_TOWLINE_DEPLOYMENTS`. This avoids the complexity of reading/writing files inside Docker volumes from the dev machine (which would require creating temporary containers or exec calls through the Portainer proxy).
 
-Every deploy/update through towline appends an entry:
+Every deploy/update through towline reads the current log from the stack env, appends an entry, and writes it back:
 ```json
-{
-  "id": "d_abc123",
-  "timestamp": "2026-03-16T14:30:00Z",
-  "description": "Added redis service for session caching",
-  "previousCompose": "...",
-  "newCompose": "...",
-  "diff": "--- previous\n+++ new\n...",
-  "outcome": "success"
-}
+[
+  {
+    "id": "d_abc123",
+    "timestamp": "2026-03-16T14:30:00Z",
+    "description": "Added redis service for session caching",
+    "diff": "--- previous\n+++ new\n...",
+    "outcome": "success"
+  }
+]
 ```
+
+The log is capped at 50 entries (oldest dropped) to stay within reasonable env var size limits. The `previousCompose` and `newCompose` fields are NOT stored — only the diff. This keeps the log compact. Full compose content is always available via `getLocalStackFile` for the current state and can be reconstructed from diffs if needed.
 
 Diff computed via line-by-line unified diff. Description is a required parameter on all deploy operations through towline.
 
@@ -576,8 +591,8 @@ confirm, re-call the tool with the approvalToken parameter.
   - Parameters: service (required), tail (int, default 200), since (RFC3339
     timestamp, optional), filter (string, optional grep-like line filter)
 
-- towline_env_get — Read stack environment variables. Sensitive values
-  (containing KEY, SECRET, PASSWORD, TOKEN) are masked.
+- towline_env_get — Read stack environment variables. Variables whose names
+  contain KEY, SECRET, PASSWORD, or TOKEN have their values masked.
   - Parameters: name (optional, reads single var)
 
 - towline_domains_list — List all domain/routing mappings for the stack.
