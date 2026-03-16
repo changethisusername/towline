@@ -1798,6 +1798,9 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Note: net/http is NOT needed here — the proxyFn closure infers
+// *http.Response type without importing net/http explicitly.
+
 const (
 	defaultToolsPath        = "tools.yaml"
 	defaultTowlineToolsPath = "towline-tools.yaml"
@@ -4490,6 +4493,7 @@ type GlobalConfig struct {
 // ProjectConfig represents a project's towline.json
 type ProjectConfig struct {
 	StackName string  `json:"stack_name"`
+	StackID   int     `json:"stack_id"`
 	Tier      string  `json:"tier"`
 	TeamID    int     `json:"team_id"`
 	UserID    int     `json:"user_id"`
@@ -4600,6 +4604,8 @@ package cli
 
 import (
 	"bufio"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -4639,13 +4645,27 @@ func runSetup(args []string) error {
 	}
 	fmt.Println("Authenticated successfully.")
 
-	// We need the user ID to generate an API token
-	// Use JWT temporarily for the next call
+	// Use JWT temporarily to generate an API key
 	api.Token = jwt
 
-	// For simplicity, generate token for user ID 1 (admin)
-	// A more robust approach would list users and find the admin
-	apiKey, err := api.GenerateAPIToken(1, "towline-admin")
+	// Decode user ID from JWT payload (base64-encoded JSON, 2nd segment)
+	parts := strings.Split(jwt, ".")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Errorf("failed to decode JWT: %w", err)
+	}
+	var claims struct {
+		ID int `json:"id"`
+	}
+	json.Unmarshal(payload, &claims)
+	if claims.ID == 0 {
+		return fmt.Errorf("could not determine user ID from JWT")
+	}
+
+	apiKey, err := api.GenerateAPIToken(claims.ID, "towline-admin")
 	if err != nil {
 		return fmt.Errorf("failed to generate API key: %w", err)
 	}
@@ -4670,8 +4690,10 @@ func runSetup(args []string) error {
 	}
 
 	fmt.Print("\nSelect environment number: ")
+	envStr, _ := reader.ReadString('\n')
+	envStr = strings.TrimSpace(envStr)
 	var envIdx int
-	fmt.Scanf("%d", &envIdx)
+	fmt.Sscanf(envStr, "%d", &envIdx)
 	if envIdx < 1 || envIdx > len(envs) {
 		return fmt.Errorf("invalid selection")
 	}
@@ -5265,10 +5287,13 @@ func runDestroy(args []string) error {
 	api := config.NewPortainerAPI(cfg.PortainerURL)
 	api.Token = cfg.PortainerAPIKey
 
-	// Delete stack (best effort)
-	fmt.Printf("Deleting stack '%s'...\n", projCfg.StackName)
-	// We'd need the stack ID — get it from Portainer
-	// For now, delete by team
+	// Delete stack
+	if projCfg.StackID > 0 {
+		fmt.Printf("Deleting stack '%s' (ID: %d)...\n", projCfg.StackName, projCfg.StackID)
+		api.DeleteStack(projCfg.StackID, projCfg.EnvID)
+	}
+
+	// Delete team
 	if projCfg.TeamID > 0 {
 		fmt.Printf("Deleting team (ID: %d)...\n", projCfg.TeamID)
 		api.DeleteTeam(projCfg.TeamID)
