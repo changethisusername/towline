@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/changethisusername/towline/internal/cli"
 )
 
 var (
@@ -18,6 +20,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Commands: setup, init, list, destroy, promote, rotate-keys, status\n")
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "Command '%s' not yet implemented\n", os.Args[1])
-	os.Exit(1)
+
+	if err := cli.Run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
 }
