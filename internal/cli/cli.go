@@ -15,7 +15,7 @@ func Run(args []string) error {
 	case "init":
 		return runInit(args[1:])
 	case "list":
-		return fmt.Errorf("not yet implemented")
+		return runList(args[1:])
 	case "destroy":
 		return fmt.Errorf("not yet implemented")
 	case "promote":
