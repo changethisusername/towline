@@ -3430,6 +3430,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // CaddyManager manages domain routing via the Caddy admin API.
@@ -3542,8 +3543,11 @@ func (c *CaddyManager) List(composeContent string) ([]DomainMapping, error) {
 				um, _ := u.(map[string]any)
 				dial, _ := um["dial"].(string)
 				if dial != "" {
-					// Parse "service:port"
-					fmt.Sscanf(dial, "%s", &service)
+					parts := strings.SplitN(dial, ":", 2)
+					service = parts[0]
+					if len(parts) > 1 {
+						fmt.Sscanf(parts[1], "%d", &port)
+					}
 				}
 			}
 		}
@@ -4018,7 +4022,7 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			Method:        "POST",
 			Path:          fmt.Sprintf("/containers/%s/exec", containerID),
 			Headers:       map[string]string{"Content-Type": "application/json"},
-			Body:          string(execCreateBody),
+			Body:          strings.NewReader(string(execCreateBody)),
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to create exec", err), nil
@@ -4038,7 +4042,7 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			Method:        "POST",
 			Path:          fmt.Sprintf("/exec/%s/start", execResp.ID),
 			Headers:       map[string]string{"Content-Type": "application/json"},
-			Body:          string(startBody),
+			Body:          strings.NewReader(string(startBody)),
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to start exec", err), nil
@@ -4084,62 +4088,9 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 }
 ```
 
-Note: The detached exec approach means we can't capture stdout/stderr directly. The output is available in the container logs. This is the safe fallback approach — a future improvement could attempt the hijacked streaming approach first.
+Note: The detached exec approach means we can't capture stdout/stderr directly. The output is available in the container logs. A future improvement could attempt the hijacked streaming approach first. The exec handler uses `strings.NewReader()` for all request bodies since `DockerProxyRequestOptions.Body` is `io.Reader`.
 
-- [ ] **Step 2: Update ProxyFunc to accept Body as string**
-
-The Docker proxy handler accepts `body` as a string parameter. Our `ProxyFunc` returns `[]byte`. We need to ensure the proxy function in `resolve.go` also supports sending a body. Update the `models.DockerProxyRequestOptions` — it already has a `Body io.Reader` field. The `proxyFn` in our code takes `models.DockerProxyRequestOptions` but our `ProxyFunc` type just returns `([]byte, error)`. We need to add a `Body` field.
-
-Actually, looking at the exec handler, we're passing `Body: string(execCreateBody)` but `DockerProxyRequestOptions.Body` is `io.Reader`. The `proxyFn` wrapper in `main.go` uses the Portainer client which expects `io.Reader`. Let's update the `ProxyFunc` signature:
-
-In `resolve.go`, update the `ProxyFunc` type to use the full options struct directly. The existing `ProxyFunc` already does this — it takes `models.DockerProxyRequestOptions` and returns `([]byte, error)`. But the `Body` field in `DockerProxyRequestOptions` is `io.Reader`, not `string`. The exec handler passes `Body: string(...)` which won't compile.
-
-Fix: in the exec handler, use `strings.NewReader()` for the body, and update `ProxyFunc` to accept the full options struct as-is. Actually, looking again at the upstream `DockerProxyRequestOptions`, its `Body` field is `io.Reader`. But our handler code in `exec.go` sets `Body: string(execCreateBody)` which is a `string`, not `io.Reader`.
-
-Actually, re-examining: our `ProxyFunc` wraps the Portainer client, and we created it in `main.go` to handle converting. The simplest fix is to change the exec handler to pass body via `strings.NewReader()`. But our `ProxyFunc` type signature takes `models.DockerProxyRequestOptions` which has `Body io.Reader`. Let me just fix the exec code:
-
-Replace `Body: string(execCreateBody)` with proper conversion. Actually, the ProxyFunc in main.go already wraps the client — we need to ensure the Body field works. Let me add a string-body helper.
-
-In exec.go, update to use `strings.NewReader`:
-
-```go
-// In the exec create call, replace:
-//   Body: string(execCreateBody),
-// With the proper approach using the options struct:
-opts := models.DockerProxyRequestOptions{
-    EnvironmentID: h.EnvID,
-    Method:        "POST",
-    Path:          fmt.Sprintf("/containers/%s/exec", containerID),
-    Headers:       map[string]string{"Content-Type": "application/json"},
-}
-// Body is set separately since it's io.Reader
-```
-
-For simplicity, let's extend the `ProxyFunc` to also support a body string parameter. Update `resolve.go`:
-
-```go
-// ProxyFunc calls the Portainer Docker proxy and returns the response body.
-// opts.Body should be set to strings.NewReader(bodyString) when sending a body.
-type ProxyFunc func(opts models.DockerProxyRequestOptions) ([]byte, error)
-```
-
-And in exec.go, use:
-```go
-import "strings"
-// ...
-opts := models.DockerProxyRequestOptions{
-    EnvironmentID: h.EnvID,
-    Method:        "POST",
-    Path:          fmt.Sprintf("/containers/%s/exec", containerID),
-    Headers:       map[string]string{"Content-Type": "application/json"},
-    Body:          strings.NewReader(string(execCreateBody)),
-}
-createResp, err := h.proxyFn(opts)
-```
-
-This step updates the exec handler to use proper `io.Reader` body passing.
-
-- [ ] **Step 3: Verify compilation, commit**
+- [ ] **Step 2: Verify compilation, commit**
 
 ```bash
 make build
@@ -4887,23 +4838,35 @@ towline.json
 
 - [ ] **Step 2: Create template loader with embed.FS**
 
+First, create a root-level embed package (Go's `//go:embed` cannot use `..` paths):
+
+```go
+// embedded.go (at repository root)
+package towline
+
+import "embed"
+
+//go:embed templates/*
+var EmbeddedTemplates embed.FS
+
+//go:embed skills/*
+var EmbeddedSkills embed.FS
+```
+
+Then in the CLI templates file:
+
 ```go
 // internal/cli/templates.go
 package cli
 
 import (
-	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"text/template"
+
+	towline "github.com/changethisusername/towline"
 )
-
-//go:embed ../../templates/*
-var embeddedTemplates embed.FS
-
-//go:embed ../../skills/*
-var embeddedSkills embed.FS
 
 // TemplateData holds interpolation values for templates.
 type TemplateData struct {
@@ -4927,10 +4890,10 @@ func renderTemplate(name string, data TemplateData, outputPath string) error {
 	var tmplContent []byte
 	var err error
 
-	if _, err := os.Stat(userPath); err == nil {
+	if _, statErr := os.Stat(userPath); statErr == nil {
 		tmplContent, err = os.ReadFile(userPath)
 	} else {
-		tmplContent, err = embeddedTemplates.ReadFile("templates/" + name)
+		tmplContent, err = towline.EmbeddedTemplates.ReadFile("templates/" + name)
 	}
 	if err != nil {
 		return fmt.Errorf("template '%s' not found: %w", name, err)
@@ -4966,7 +4929,7 @@ func copySkillFile(projectDir string) error {
 	if _, statErr := os.Stat(userPath); statErr == nil {
 		content, err = os.ReadFile(userPath)
 	} else {
-		content, err = embeddedSkills.ReadFile("skills/towline-devops.md")
+		content, err = towline.EmbeddedSkills.ReadFile("skills/towline-devops.md")
 	}
 	if err != nil {
 		return fmt.Errorf("skill file not found: %w", err)
