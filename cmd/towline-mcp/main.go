@@ -3,11 +3,14 @@ package main
 import (
 	"flag"
 	"io"
+	"strings"
 
 	"github.com/changethisusername/towline/internal/approval"
 	"github.com/changethisusername/towline/internal/mcp"
 	"github.com/changethisusername/towline/internal/middleware"
+	"github.com/changethisusername/towline/internal/proxy"
 	"github.com/changethisusername/towline/internal/tooldef"
+	"github.com/changethisusername/towline/internal/towline"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -146,11 +149,14 @@ func main() {
 	// We use AddToolWrapped instead of the upstream Add*Features methods
 	registerWrappedUpstreamTools(srv, wrappers)
 
-	// Register towline-specific tools (implemented in later tasks, stubs for now)
-	// TODO: registerTowlineTools(srv, wrappers, ...)
+	// Create towline handlers
+	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
 
-	_ = proxyFlag    // Used in later tasks (proxy detection)
-	_ = caddyAPIFlag // Used in later tasks (Caddy backend)
+	// Setup proxy manager (auto-detect or use flag)
+	setupProxyManager(handlers, srv, *stackFlag, *proxyFlag, *caddyAPIFlag)
+
+	// Register towline-specific tools
+	registerTowlineTools(srv, handlers, wrappers)
 
 	err = srv.Start()
 	if err != nil {
@@ -214,4 +220,71 @@ func registerWrappedUpstreamTools(srv *mcp.PortainerMCPServer, wrappers func(str
 	// edge stack, kubernetes, tag, or settings tools — they are admin-level
 	// operations that should not be available to project-scoped agents.
 	// The agent only needs local stack management and Docker proxy.
+}
+
+// setupProxyManager configures the proxy backend on the handlers.
+// If an explicit flag is provided, that backend is used.
+// Otherwise it auto-detects from the compose file (checks for traefik labels).
+func setupProxyManager(h *towline.Handlers, srv *mcp.PortainerMCPServer, stackName, proxyFlag, caddyAPI string) {
+	if proxyFlag != "" {
+		switch proxy.Backend(proxyFlag) {
+		case proxy.BackendTraefik:
+			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
+			log.Info().Str("proxy", "traefik").Msg("proxy backend configured via flag")
+		case proxy.BackendCaddy:
+			cm := proxy.NewCaddyManager(caddyAPI)
+			h.ProxyManager = cm
+			h.CaddyManager = cm
+			log.Info().Str("proxy", "caddy").Str("api", caddyAPI).Msg("proxy backend configured via flag")
+		case proxy.BackendCloudflare:
+			h.ProxyManager = &proxy.CloudflareManager{StackName: stackName}
+			log.Info().Str("proxy", "cloudflare").Msg("proxy backend configured via flag")
+		default:
+			log.Warn().Str("proxy", proxyFlag).Msg("unknown proxy backend, will require explicit method parameter")
+		}
+		return
+	}
+
+	// Auto-detect from compose file
+	stacks, err := srv.Client().GetLocalStacks()
+	if err != nil {
+		log.Warn().Err(err).Msg("cannot auto-detect proxy backend: failed to get stacks")
+		return
+	}
+
+	for _, s := range stacks {
+		if s.Name != stackName {
+			continue
+		}
+
+		compose, err := srv.Client().GetLocalStackFile(s.ID)
+		if err != nil {
+			log.Warn().Err(err).Msg("cannot auto-detect proxy backend: failed to get compose file")
+			return
+		}
+
+		if strings.Contains(compose, "traefik.http.routers") || strings.Contains(compose, "traefik.enable") {
+			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
+			log.Info().Str("proxy", "traefik").Msg("proxy backend auto-detected from compose labels")
+			return
+		}
+
+		break
+	}
+
+	log.Info().Msg("no proxy backend detected; domain tools will require explicit method parameter")
+}
+
+// registerTowlineTools registers all towline-specific tools with the MCP server.
+func registerTowlineTools(srv *mcp.PortainerMCPServer, h *towline.Handlers, wrappers func(string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc) {
+	srv.AddToolWrapped("towline_service_health", h.HandleServiceHealth(), wrappers("towline_service_health")...)
+	srv.AddToolWrapped("towline_service_logs", h.HandleServiceLogs(), wrappers("towline_service_logs")...)
+	srv.AddToolWrapped("towline_env_get", h.HandleEnvGet(), wrappers("towline_env_get")...)
+	srv.AddToolWrapped("towline_env_set", h.HandleEnvSet(), wrappers("towline_env_set")...)
+	srv.AddToolWrapped("towline_domains_list", h.HandleDomainsList(), wrappers("towline_domains_list")...)
+	srv.AddToolWrapped("towline_domains_add", h.HandleDomainsAdd(), wrappers("towline_domains_add")...)
+	srv.AddToolWrapped("towline_domains_remove", h.HandleDomainsRemove(), wrappers("towline_domains_remove")...)
+	srv.AddToolWrapped("towline_scale", h.HandleScale(), wrappers("towline_scale")...)
+	srv.AddToolWrapped("towline_deployments", h.HandleDeployments(), wrappers("towline_deployments")...)
+	srv.AddToolWrapped("towline_exec", h.HandleExec(), wrappers("towline_exec")...)
 }
