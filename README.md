@@ -1,6 +1,6 @@
 # Towline
 
-**The agentic engineering SDK. One command gives your AI agent a complete environment to build, deploy, and operate software.**
+**The agentic engineering SDK for Portainer. One command gives your AI agent a complete environment to build, deploy, and operate software on your Portainer infrastructure.**
 
 <!-- Badges: uncomment and update when applicable
 [![Build](https://img.shields.io/github/actions/workflow/status/changethisusername/towline/ci.yml?branch=main)](https://github.com/changethisusername/towline/actions)
@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 -->
 
-AI coding agents can write code, run tests, and manage git. But they stop at the deploy boundary. Towline removes that boundary. A single `towline init` gives your agent an isolated deployment environment, operational tools, domain-specific skills, and the knowledge to ship and operate what it builds — not just write it.
+AI coding agents can write code, run tests, and manage git. But they stop at the deploy boundary. Towline removes that boundary. Built on [Portainer](https://portainer.io), a single `towline init` provisions an isolated container stack, wires up MCP tools, installs operational skills, and configures your agent — so it can ship and operate what it builds, not just write it.
 
 [Website](https://towline.dev) | [Getting Started](docs/getting-started.md) | [User Guide](docs/user-guide.md)
 
@@ -64,13 +64,13 @@ Open the project in any MCP-compatible agent and start building.
 curl -fsSL https://towline.dev/install | sh
 ```
 
-### 2. Connect your infrastructure
+### 2. Connect to Portainer
 
 ```bash
 towline setup
 ```
 
-Points Towline at your [Portainer](https://portainer.io) instance. Interactive wizard — takes 30 seconds.
+Points Towline at your Portainer instance (CE 2.28+). Interactive wizard — takes 30 seconds.
 
 ### 3. Create a project
 
@@ -309,11 +309,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for project structure and development wor
 
 ## Roadmap
 
-**Now**: Portainer-backed deployment with three-layer permissions, 10 MCP tools, template packs with skills and MCP configs.
+**Now**: Portainer deployment with three-layer permissions, 10 MCP tools, template packs with skills and MCP configs.
 
-**Next**: `towline promote` (dev → prod workflow), `towline rotate-keys`, `towline status`, approval server integrations (Telegram, ntfy.sh).
+**Next**: `towline promote` (dev-to-prod workflow), `towline rotate-keys`, `towline status`, approval server integrations (Telegram, ntfy.sh).
 
-**Later**: Additional deployment backends beyond Portainer. Encrypted keystore. Community pack registry. Plugin system for custom tools.
+**Later**: Encrypted keystore. Community pack registry. Plugin system for custom tools.
 
 ---
 

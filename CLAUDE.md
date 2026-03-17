@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Towline is the agentic engineering SDK. One command (`towline init`) gives an AI agent a complete environment to build, deploy, and operate software — isolated deployment target, operational MCP tools, domain-specific skills, and multi-agent configuration.
+Towline is the agentic engineering SDK for Portainer. One command (`towline init`) gives an AI agent a complete environment to build, deploy, and operate software on Portainer-managed infrastructure — isolated container stack, operational MCP tools, domain-specific skills, and multi-agent configuration.
 
 Three components:
 

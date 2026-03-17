@@ -1,6 +1,6 @@
 # Getting Started with Towline
 
-This guide walks you through installing Towline, connecting it to your infrastructure, and creating your first project — a complete environment where your AI agent can build, deploy, and operate software. About 5 minutes end to end.
+This guide walks you through installing Towline, connecting it to your Portainer instance, and creating your first project — a complete environment where your AI agent can build, deploy, and operate software on your Portainer infrastructure. About 5 minutes end to end.
 
 ## Prerequisites
 
