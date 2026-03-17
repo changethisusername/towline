@@ -1,0 +1,19 @@
+# Template pack: ai-stack
+# Ollama + Open WebUI + Postgres for local AI/LLM workflows
+name: ai-stack
+description: Local AI inference with Ollama, Open WebUI, and Postgres
+
+# Compose file to use (relative to this pack directory)
+compose: compose.yml
+
+# Additional skills to copy into projects (relative to this pack directory)
+skills:
+  - ai-ops.md
+
+# Additional MCP servers to add to agent configs
+mcps:
+  ollama:
+    command: "npx"
+    args: ["-y", "@anthropic/ollama-mcp"]
+    env:
+      OLLAMA_HOST: "http://localhost:11434"

@@ -7,3 +7,5 @@ towline-tools.yaml
 *.key
 .env
 .env.*
+towline-mcp
+.claude/

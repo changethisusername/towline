@@ -109,10 +109,32 @@ func runInit(args []string) error {
 		}
 	}
 
-	// Render compose template
-	composeTemplate := "compose/" + *tmpl + ".yml"
-	if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
-		return fmt.Errorf("failed to render compose template: %w", err)
+	// Check if template is a pack (has pack.yaml) or a simple compose template
+	pack, packDir, packErr := loadPack(*tmpl)
+	if packErr != nil {
+		return fmt.Errorf("failed to load template pack: %w", packErr)
+	}
+
+	if pack != nil {
+		// Template pack: use pack compose and copy pack skills
+		composeContent, err := readPackComposeContent(pack, packDir)
+		if err != nil {
+			return fmt.Errorf("failed to read pack compose: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
+			return fmt.Errorf("failed to write compose: %w", err)
+		}
+
+		// Apply pack skills
+		if err := applyPack(pack, packDir, projectDir); err != nil {
+			return fmt.Errorf("failed to apply pack: %w", err)
+		}
+	} else {
+		// Simple compose template
+		composeTemplate := "compose/" + *tmpl + ".yml"
+		if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
+			return fmt.Errorf("failed to render compose template: %w", err)
+		}
 	}
 
 	// Create .env.example
@@ -120,7 +142,7 @@ func runInit(args []string) error {
 		return fmt.Errorf("failed to create .env.example: %w", err)
 	}
 
-	// Copy DevOps skill
+	// Copy base DevOps skill (always included)
 	if err := copySkillFile(projectDir); err != nil {
 		return fmt.Errorf("failed to copy skill file: %w", err)
 	}

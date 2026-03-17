@@ -1,0 +1,11 @@
+# Template pack: n8n
+# n8n workflow automation with Postgres backend
+name: n8n
+description: n8n workflow automation + Postgres
+
+compose: compose.yml
+
+skills:
+  - n8n-ops.md
+
+mcps: {}

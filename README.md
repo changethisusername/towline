@@ -333,19 +333,22 @@ Templates are embedded in the Go binary and can be overridden by placing files i
 
 **Bundled compose templates:**
 
-| Template | Description |
-|----------|-------------|
+**Simple compose templates:**
+
+| Template | Stack |
+|----------|-------|
 | `default` | Empty starter (`services: {}`) |
-| `web-app` | Nginx app + PostgreSQL 16 + Redis 7 |
+| `web-app` | Nginx + PostgreSQL 16 + Redis 7 |
 | `api` | Node.js API + PostgreSQL 16 |
-| `fullstack` | Frontend + API + PostgreSQL + Redis |
-| `worker` | Python worker + Redis queue + PostgreSQL |
-| `static-site` | Nginx serving static files |
-| `mysql-app` | Nginx app + MySQL 8 |
-| `mongo-app` | Node.js app + MongoDB 7 |
-| `n8n` | n8n workflow automation + PostgreSQL |
-| `wordpress` | WordPress + MySQL 8 |
-| `ghost` | Ghost CMS + MySQL 8 |
+
+**Template packs** (compose + skills + MCP configs):
+
+| Pack | Stack | Extras |
+|------|-------|--------|
+| `ai-stack` | Ollama + Open WebUI + PostgreSQL | AI ops skill, Ollama MCP |
+| `n8n` | n8n + PostgreSQL | n8n ops skill |
+
+Use packs with `towline init my-project --template ai-stack`. Packs include domain-specific skills that teach agents how to operate the stack, and can add additional MCP servers to agent configs.
 
 **Template variables** (Go `text/template` syntax):
 

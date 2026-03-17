@@ -354,29 +354,30 @@ Approval tokens expire after 5 minutes. If you don't approve in time, the agent 
 
 ### Bundled templates
 
-| Template | Contents |
-|----------|----------|
-| `default` | Empty stack (`services: {}`) |
-| `web-app` | Nginx app + PostgreSQL 16 + Redis 7 |
+**Simple compose templates:**
+
+| Template | Stack |
+|----------|-------|
+| `default` | Empty (`services: {}`) |
+| `web-app` | Nginx + PostgreSQL 16 + Redis 7 |
 | `api` | Node.js API + PostgreSQL 16 |
-| `fullstack` | Frontend + API + PostgreSQL + Redis |
-| `worker` | Python worker + Redis queue + PostgreSQL |
-| `static-site` | Nginx serving static files |
-| `mysql-app` | Nginx app + MySQL 8 |
-| `mongo-app` | Node.js app + MongoDB 7 |
-| `n8n` | n8n workflow automation + PostgreSQL |
-| `wordpress` | WordPress + MySQL 8 |
-| `ghost` | Ghost CMS + MySQL 8 |
 
-### Creating custom templates
+**Template packs** (compose + skills + MCP configs):
 
-1. Create your template:
+| Pack | Stack | Includes |
+|------|-------|----------|
+| `ai-stack` | Ollama + Open WebUI + PostgreSQL | AI ops skill, Ollama MCP config |
+| `n8n` | n8n + PostgreSQL | n8n ops skill |
+
+### Creating custom compose templates
+
+For simple stacks that just need a compose file:
 
 ```bash
 mkdir -p ~/.towline/templates/compose
 ```
 
-2. Write a compose YAML file. You can use Go template variables:
+Write a compose YAML:
 
 ```yaml
 # ~/.towline/templates/compose/ml-pipeline.yml
@@ -399,11 +400,63 @@ volumes:
   minio_data:
 ```
 
-3. Use it:
+Use it: `towline init my-ml-project --template ml-pipeline`
+
+### Creating template packs
+
+Template packs bundle a compose file, domain-specific skills, and additional MCP server configs into a single reusable unit.
+
+Create a pack directory:
 
 ```bash
-towline init my-ml-project --template ml-pipeline
+mkdir -p ~/.towline/packs/my-pack
 ```
+
+Create `pack.yaml`:
+
+```yaml
+name: my-pack
+description: My custom stack with extra tooling
+
+# Compose file (relative to this directory)
+compose: compose.yml
+
+# Additional skill files to copy into projects
+skills:
+  - my-custom-ops.md
+
+# Additional MCP servers to add to agent configs
+mcps:
+  my-tool:
+    command: "npx"
+    args: ["-y", "@my-org/my-mcp-server"]
+    env:
+      MY_API_KEY: "${MY_API_KEY}"
+```
+
+Add your compose file and skill files in the same directory:
+
+```
+~/.towline/packs/my-pack/
+├── pack.yaml
+├── compose.yml
+└── my-custom-ops.md
+```
+
+Use it: `towline init my-project --template my-pack`
+
+The pack's skills are copied alongside the base DevOps skill. The pack's MCP configs are merged into the generated agent settings files.
+
+### What goes in a skill file?
+
+Skill files are markdown documents that teach agents how to operate a specific stack. Good skills include:
+
+- **Key environment variables** the stack needs
+- **Common tasks** with the exact tool calls to use
+- **Troubleshooting** for known failure modes
+- **Architecture notes** (which service talks to which, what ports)
+
+See the bundled `skills/towline-devops.md` and the pack skills in `templates/packs/` for examples.
 
 ### Overriding agent instructions
 
