@@ -1,6 +1,6 @@
 # Getting Started with Towline
 
-This guide walks you through installing Towline, connecting it to your Portainer instance, creating your first project, and deploying your first container — all in about 5 minutes.
+This guide walks you through installing Towline, connecting it to your infrastructure, and creating your first project — a complete environment where your AI agent can build, deploy, and operate software. About 5 minutes end to end.
 
 ## Prerequisites
 
@@ -117,32 +117,25 @@ The agent automatically connects to the Towline MCP server. You can verify by as
 
 The agent will call `towline_service_health` and report the current state. If you used the default template, the stack is empty — the agent will tell you there are no services running.
 
-## Step 5: Deploy something
+## Step 5: Build something
 
-Ask your agent to deploy a service:
+This is where it gets interesting. Your agent doesn't just deploy containers — it builds and ships software. Try:
 
-> "Add a Nginx web server to the stack, expose it on port 8080, and verify it's healthy."
+> "Build me a simple URL shortener. Use Go for the API, Postgres for storage. Deploy it and expose it on port 8080."
 
-The agent will:
-1. Read the current compose file (`getLocalStackFile`)
-2. Add the Nginx service to it
-3. Deploy the updated compose (`updateLocalStack`)
-4. Check health (`towline_service_health`)
-5. Report the result
+The agent will write the application code, create a Dockerfile, set up the database, deploy everything, and verify it works — all using the Towline MCP tools.
 
-You can then visit your Portainer UI to see the container running in the `my-first-app-dev` stack.
-
-### Try more complex tasks
+### More examples
 
 > "Add PostgreSQL and Redis to the stack. Set the database password to 'devpass123'. Verify all services are healthy and can reach each other."
 
-> "Check the logs for the app service — it seems to be crash-looping."
+> "The app is crash-looping. Diagnose the issue and fix it."
 
 > "Scale the worker service to 3 replicas."
 
-> "Expose the app service on app.mylab.local via Traefik."
+> "Expose the API on api.mylab.local via Traefik."
 
-The DevOps skill in `skills/towline-devops.md` guides the agent through operational decision-making, so it knows to check dependencies, read logs before restarting, and always submit complete compose files.
+The DevOps skill in `skills/towline-devops.md` teaches the agent operational decision-making — how to diagnose before restarting, how to check dependencies, how to deploy safely. It's not just tooling access; it's the knowledge to use it well.
 
 ## Step 6: Manage your projects
 

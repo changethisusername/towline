@@ -4,12 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Towline is an open-source framework that gives AI coding agents safe, project-scoped access to deploy and manage containers on self-hosted infrastructure running Portainer. It consists of two components:
+Towline is the agentic engineering SDK. One command (`towline init`) gives an AI agent a complete environment to build, deploy, and operate software — isolated deployment target, operational MCP tools, domain-specific skills, and multi-agent configuration.
 
-1. **towline-mcp** — A forked Portainer MCP server (Go) with project-scoped permissions middleware
-2. **towline CLI** — A project scaffolding tool that provisions Portainer teams, API keys, stacks, and agent configuration
+Three components:
 
-The core principle: a new project should go from idea to "agent with full isolated deploy access" in under 60 seconds with zero manual configuration.
+1. **towline-mcp** — Go binary (forked Portainer MCP v0.7.0). MCP server with stack scoping middleware, tier-based approval gating, and 10 high-level operational tools
+2. **towline CLI** — Go binary. Project scaffolding that provisions Portainer teams, API keys, stacks, and agent configuration
+3. **Template packs** — Compose files + agent skills + MCP configs bundled as reusable starter kits
+
+The core principle: a new project should go from idea to "agent building and shipping software in an isolated environment" in under 60 seconds.
 
 ## Build & Test
 

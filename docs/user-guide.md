@@ -1,6 +1,6 @@
 # Towline User Guide
 
-This guide covers day-to-day usage of Towline after initial setup. For installation and first-project setup, see [Getting Started](getting-started.md).
+This guide covers day-to-day usage of Towline — how to work with your agent to build, deploy, and operate software in Towline-managed projects. For installation and first-project setup, see [Getting Started](getting-started.md).
 
 ## Table of contents
 
