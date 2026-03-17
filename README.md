@@ -10,7 +10,7 @@
 
 Towline is an open-source framework that sits between AI agents and [Portainer](https://www.portainer.io/), providing isolated deploy environments with layered permissions and operational tooling. One command creates a fully provisioned project where an agent can deploy, scale, debug, and manage containers without touching anything outside its scope.
 
-[Website](https://towline.dev)
+[Website](https://towline.dev) | [Getting Started](docs/getting-started.md) | [User Guide](docs/user-guide.md)
 
 ---
 
@@ -505,4 +505,4 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 ## License
 
-License not yet chosen. See [LICENSE](LICENSE) for details when available.
+Apache License 2.0. See [LICENSE](LICENSE).
