@@ -1,0 +1,21 @@
+services:
+  worker:
+    image: "${WORKER_IMAGE:-python:3.12-slim}"
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      DATABASE_URL: "postgres://${DB_USER:-app}:${DB_PASSWORD}@db:5432/${DB_NAME:-app}"
+    depends_on:
+      - redis
+      - db
+  redis:
+    image: redis:7-alpine
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: "${DB_NAME:-app}"
+      POSTGRES_USER: "${DB_USER:-app}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+volumes:
+  db_data:

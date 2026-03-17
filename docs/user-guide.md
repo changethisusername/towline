@@ -357,7 +357,16 @@ Approval tokens expire after 5 minutes. If you don't approve in time, the agent 
 | Template | Contents |
 |----------|----------|
 | `default` | Empty stack (`services: {}`) |
-| `web-app` | Nginx app + PostgreSQL 16 + Redis 7 with persistent storage |
+| `web-app` | Nginx app + PostgreSQL 16 + Redis 7 |
+| `api` | Node.js API + PostgreSQL 16 |
+| `fullstack` | Frontend + API + PostgreSQL + Redis |
+| `worker` | Python worker + Redis queue + PostgreSQL |
+| `static-site` | Nginx serving static files |
+| `mysql-app` | Nginx app + MySQL 8 |
+| `mongo-app` | Node.js app + MongoDB 7 |
+| `n8n` | n8n workflow automation + PostgreSQL |
+| `wordpress` | WordPress + MySQL 8 |
+| `ghost` | Ghost CMS + MySQL 8 |
 
 ### Creating custom templates
 

@@ -1,0 +1,20 @@
+services:
+  app:
+    image: "${APP_IMAGE:-nginx:alpine}"
+    ports:
+      - "8080:80"
+    environment:
+      DATABASE_URL: "mysql://${DB_USER:-app}:${DB_PASSWORD}@db:3306/${DB_NAME:-app}"
+    depends_on:
+      - db
+  db:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: "${DB_NAME:-app}"
+      MYSQL_USER: "${DB_USER:-app}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+    volumes:
+      - db_data:/var/lib/mysql
+volumes:
+  db_data:

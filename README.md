@@ -336,7 +336,16 @@ Templates are embedded in the Go binary and can be overridden by placing files i
 | Template | Description |
 |----------|-------------|
 | `default` | Empty starter (`services: {}`) |
-| `web-app` | App + PostgreSQL 16 + Redis 7 |
+| `web-app` | Nginx app + PostgreSQL 16 + Redis 7 |
+| `api` | Node.js API + PostgreSQL 16 |
+| `fullstack` | Frontend + API + PostgreSQL + Redis |
+| `worker` | Python worker + Redis queue + PostgreSQL |
+| `static-site` | Nginx serving static files |
+| `mysql-app` | Nginx app + MySQL 8 |
+| `mongo-app` | Node.js app + MongoDB 7 |
+| `n8n` | n8n workflow automation + PostgreSQL |
+| `wordpress` | WordPress + MySQL 8 |
+| `ghost` | Ghost CMS + MySQL 8 |
 
 **Template variables** (Go `text/template` syntax):
 
