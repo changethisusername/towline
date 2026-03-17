@@ -1,6 +1,6 @@
 # Towline
 
-**Give AI coding agents safe, project-scoped access to deploy and manage containers on your self-hosted infrastructure.**
+**Give AI coding agents safe, project-scoped access to deploy and manage containers on your Portainer infrastructure.**
 
 <!-- Badges: uncomment and update when applicable
 [![Build](https://img.shields.io/github/actions/workflow/status/OWNER/towline/ci.yml?branch=main)](https://github.com/OWNER/towline/actions)
@@ -54,12 +54,16 @@ Each agent gets a dedicated MCP server process that can only see and modify its 
 ### 1. Install
 
 ```bash
-# Build from source
-git clone https://github.com/OWNER/towline.git
+# One-line installer (macOS, Linux, WSL)
+curl -fsSL https://towline.dev/install | sh
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/changethisusername/towline.git
 cd towline
 make build
-
-# Binaries land in dist/
 sudo cp dist/towline dist/towline-mcp /usr/local/bin/
 ```
 

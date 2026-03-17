@@ -6,7 +6,7 @@ This guide walks you through installing Towline, connecting it to your Portainer
 
 Before you begin, you need:
 
-- **Portainer CE 2.28+** running on your homelab (or any Docker host). The free Community Edition is sufficient. API access must be enabled (it is by default).
+- **Portainer CE 2.28+** running on any Docker host (homelab, VPS, cloud VM, local machine). The free Community Edition is sufficient. API access must be enabled (it is by default).
 - **Docker** on the machine Portainer manages.
 - **An AI coding agent** that supports MCP: [Claude Code](https://claude.ai/code), [Cursor](https://cursor.sh), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Windsurf](https://windsurf.ai), or [Codex](https://github.com/openai/codex).
 - **Go 1.24+** for building from source (or download a pre-built release when available).
@@ -14,21 +14,20 @@ Before you begin, you need:
 
 ## Step 1: Install Towline
 
-Build from source:
+The fastest way:
+
+```bash
+curl -fsSL https://towline.dev/install | sh
+```
+
+This detects your OS and architecture, downloads the correct binaries from GitHub Releases, verifies checksums, and installs to `/usr/local/bin` (or `~/.local/bin` if you don't have sudo).
+
+Or build from source:
 
 ```bash
 git clone https://github.com/changethisusername/towline.git
 cd towline
 make build
-```
-
-This produces two binaries in `dist/`:
-- `towline` — the CLI for managing projects
-- `towline-mcp` — the MCP server that agents connect to
-
-Install them somewhere on your PATH:
-
-```bash
 sudo cp dist/towline dist/towline-mcp /usr/local/bin/
 ```
 

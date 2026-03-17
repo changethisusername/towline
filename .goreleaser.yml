@@ -1,0 +1,74 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: towline-mcp
+    main: ./cmd/towline-mcp
+    binary: towline-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.ShortCommit}}
+      - -X main.BuildDate={{.Date}}
+
+  - id: towline
+    main: ./cmd/towline
+    binary: towline
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.ShortCommit}}
+      - -X main.BuildDate={{.Date}}
+
+archives:
+  - id: towline-mcp
+    builds:
+      - towline-mcp
+    name_template: "towline-mcp_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+
+  - id: towline
+    builds:
+      - towline
+    name_template: "towline_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: changethisusername
+    name: towline
+  draft: false
+  prerelease: auto
+  name_template: "Towline {{.Tag}}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
