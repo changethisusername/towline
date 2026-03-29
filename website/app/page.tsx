@@ -113,19 +113,15 @@ export default function Home() {
         </p>
 
         <h3 className="mt-6 text-[14px] font-semibold text-text">3. Create a project</h3>
-        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3.5">
-          <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`# Simple API project
-towline init my-api --template api
-
-# AI stack with Ollama + Open WebUI (includes AI ops skill)
-towline init my-ai --pack ai-stack
-
-# n8n automation (includes workflow ops skill)
-towline init my-workflows --pack n8n`}</code></pre>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
+          <code className="text-[13px] text-text-secondary">
+            <span className="select-none text-text-muted">$ </span>
+            <span className="text-text">towline init my-app</span>
+          </code>
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
-          This creates the Portainer team, API key, and stack, writes the agent configuration,
-          installs skills, and initializes git. The project directory is ready for your agent.
+          Creates a Portainer team, scoped API key, container stack, MCP server config,
+          DevOps skill, compose file, and git repo. The project directory is ready for your agent.
         </p>
 
         <h3 className="mt-6 text-[14px] font-semibold text-text">4. Start your agent</h3>
