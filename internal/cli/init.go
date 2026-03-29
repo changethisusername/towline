@@ -17,14 +17,13 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	tier := fs.String("tier", "dev", "Deployment tier (dev or prod)")
 	tmpl := fs.String("template", "default", "Compose template name")
-	dir := fs.String("dir", "", "Use an existing directory instead of creating a new one")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: towline init [--tier dev|prod] [--template name] [--dir path] <project-name>")
+		return fmt.Errorf("usage: towline init [--tier dev|prod] [--template name] <project-name>")
 	}
 
 	projectName := fs.Arg(0)
@@ -39,23 +38,18 @@ func runInit(args []string) error {
 		return err
 	}
 
-	// Determine project directory and whether it's an existing codebase
-	existingDir := *dir != ""
+	// Detect if we're in an existing codebase (has .git, package.json, go.mod, etc.)
+	cwd, _ := os.Getwd()
+	existingDir := isExistingCodebase(cwd)
 	var projectDir string
 
 	if existingDir {
-		projectDir, err = filepath.Abs(*dir)
-		if err != nil {
-			return fmt.Errorf("failed to resolve directory path: %w", err)
-		}
-		if _, err := os.Stat(projectDir); os.IsNotExist(err) {
-			return fmt.Errorf("directory does not exist: %s", projectDir)
-		}
+		projectDir = cwd
 		fmt.Printf("Adding Towline to existing project '%s' in %s\n", projectName, projectDir)
 	} else {
 		projectDir = filepath.Join(globalCfg.ProjectsDir, projectName)
 		if _, err := os.Stat(projectDir); err == nil {
-			return fmt.Errorf("project directory already exists: %s (use --dir to add Towline to an existing project)", projectDir)
+			return fmt.Errorf("project directory already exists: %s", projectDir)
 		}
 		if err := os.MkdirAll(projectDir, 0755); err != nil {
 			return fmt.Errorf("failed to create project directory: %w", err)
@@ -401,6 +395,30 @@ func readTemplateContent(name string) ([]byte, error) {
 // readEmbeddedTemplate reads a template from the embedded filesystem.
 func readEmbeddedTemplate(name string) ([]byte, error) {
 	return towline.EmbeddedTemplates.ReadFile("templates/" + name)
+}
+
+// isExistingCodebase checks if a directory looks like an existing project
+// by looking for common project markers.
+func isExistingCodebase(dir string) bool {
+	markers := []string{
+		".git",
+		"package.json",
+		"go.mod",
+		"Cargo.toml",
+		"pyproject.toml",
+		"requirements.txt",
+		"Makefile",
+		"pom.xml",
+		"build.gradle",
+		"Gemfile",
+		"composer.json",
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // generatePassword generates a random password of the given length.

@@ -52,10 +52,11 @@ Getting started:
 Commands:
   setup          Connect to a Portainer instance (saves to ~/.towline/config.yaml)
   init <name>    Create a project: Portainer team, scoped API key, container stack,
-                 MCP config, DevOps skill, compose file, and git repo
+                 MCP config, DevOps skill, compose file, and git repo.
+                 Run inside an existing codebase to add Towline to it
+                 (auto-detected via .git, package.json, go.mod, etc.)
                  Flags: --template <name>  Compose template (api, web-app, default)
                         --tier <dev|prod>  Deployment tier (default: dev)
-                        --dir <path>       Add Towline to an existing codebase
   list           List all Towline projects on this machine
   destroy <name> Remove a project: deletes team, API key, stack, and local files
   promote <name> Promote a project from dev to prod tier
