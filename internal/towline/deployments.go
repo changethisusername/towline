@@ -167,7 +167,7 @@ func (h *Handlers) writeDeployments(entries []DeploymentEntry) error {
 		})
 	}
 
-	return h.Server.Client().UpdateLocalStack(stack.ID, h.EnvID, composeFile, envVars, false, false)
+	return h.Server.Client().UpdateLocalStack(stack.ID, stack.EndpointID, composeFile, envVars, false, false)
 }
 
 // computeSimpleDiff produces a basic line-by-line diff between old and new text.

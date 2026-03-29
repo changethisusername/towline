@@ -17,7 +17,7 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	tier := fs.String("tier", "dev", "Deployment tier (dev or prod)")
 	tmpl := fs.String("template", "default", "Compose template name")
-	withProd := fs.Bool("with-prod", false, "Also create a prod stack")
+	_ = fs.Bool("with-prod", false, "Also create a prod stack (not yet implemented, use towline promote)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -61,9 +61,23 @@ func runInit(args []string) error {
 	stackName := projectName + "-" + *tier
 	teamID, userID, apiToken, stackID, err := provisionTier(api, globalCfg, projectName, stackName, *tmpl)
 	if err != nil {
-		// Clean up on failure
 		os.RemoveAll(projectDir)
 		return fmt.Errorf("failed to provision %s tier: %w", *tier, err)
+	}
+
+	// Cleanup helper for failures after provisioning
+	cleanupPortainer := func() {
+		fmt.Println("Cleaning up Portainer resources...")
+		if stackID > 0 {
+			_ = api.DeleteStack(stackID, globalCfg.PortainerEnvID)
+		}
+		if userID > 0 {
+			_ = api.DeleteUser(userID)
+		}
+		if teamID > 0 {
+			_ = api.DeleteTeam(teamID)
+		}
+		os.RemoveAll(projectDir)
 	}
 
 	// Resolve MCP binary path
@@ -105,6 +119,7 @@ func runInit(args []string) error {
 
 	for _, t := range templates {
 		if err := renderTemplate(t.name, data, t.output); err != nil {
+			cleanupPortainer()
 			return fmt.Errorf("failed to render %s: %w", t.name, err)
 		}
 	}
@@ -112,6 +127,7 @@ func runInit(args []string) error {
 	// Check if template is a pack (has pack.yaml) or a simple compose template
 	pack, packDir, packErr := loadPack(*tmpl)
 	if packErr != nil {
+		cleanupPortainer()
 		return fmt.Errorf("failed to load template pack: %w", packErr)
 	}
 
@@ -119,15 +135,18 @@ func runInit(args []string) error {
 		// Template pack: use pack compose and copy pack skills
 		composeContent, err := readPackComposeContent(pack, packDir)
 		if err != nil {
-			return fmt.Errorf("failed to read pack compose: %w", err)
+			cleanupPortainer()
+		return fmt.Errorf("failed to read pack compose: %w", err)
 		}
 		if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
-			return fmt.Errorf("failed to write compose: %w", err)
+			cleanupPortainer()
+		return fmt.Errorf("failed to write compose: %w", err)
 		}
 
 		// Apply pack skills
 		if err := applyPack(pack, packDir, projectDir); err != nil {
-			return fmt.Errorf("failed to apply pack: %w", err)
+			cleanupPortainer()
+		return fmt.Errorf("failed to apply pack: %w", err)
 		}
 
 		// Merge pack MCPs into agent config files
@@ -138,7 +157,8 @@ func runInit(args []string) error {
 		// Simple compose template
 		composeTemplate := "compose/" + *tmpl + ".yml"
 		if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
-			return fmt.Errorf("failed to render compose template: %w", err)
+			cleanupPortainer()
+		return fmt.Errorf("failed to render compose template: %w", err)
 		}
 	}
 
@@ -149,6 +169,7 @@ func runInit(args []string) error {
 
 	// Copy base DevOps skill (always included)
 	if err := copySkillFile(projectDir); err != nil {
+		cleanupPortainer()
 		return fmt.Errorf("failed to copy skill file: %w", err)
 	}
 
@@ -180,20 +201,6 @@ func runInit(args []string) error {
 		fmt.Printf("warning: %v\n", err)
 	} else {
 		fmt.Println("OK")
-	}
-
-	// Handle --with-prod
-	if *withProd && *tier == "dev" {
-		fmt.Println()
-		fmt.Print("Provisioning prod tier... ")
-		prodStackName := projectName + "-prod"
-		_, _, _, _, err := provisionTier(api, globalCfg, projectName, prodStackName, *tmpl)
-		if err != nil {
-			fmt.Printf("warning: %v\n", err)
-		} else {
-			fmt.Println("OK")
-			fmt.Println("Note: run 'towline promote " + projectName + "' to add prod MCP config to agent settings.")
-		}
 	}
 
 	fmt.Println()
@@ -280,22 +287,28 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 	}
 	api.Token = userJWT
 	apiToken, err = api.GenerateAPIToken(userID, "towline-"+stackName, password)
-	api.Token = savedToken // restore admin token for remaining operations
 	if err != nil {
+		api.Token = savedToken
 		return 0, 0, "", 0, fmt.Errorf("failed to generate API token: %w", err)
 	}
 	fmt.Println("OK")
 
-	// Read compose template
+	// Read compose template — fail fast if template doesn't exist
 	composeContent := "services: {}\n"
 	composePath := "compose/" + tmpl + ".yml"
 	if content, readErr := readTemplateContent(composePath); readErr == nil {
 		composeContent = string(content)
+	} else if tmpl != "default" {
+		api.Token = savedToken
+		return 0, 0, "", 0, fmt.Errorf("template '%s' not found: %w", tmpl, readErr)
 	}
 
-	// Create stack
+	// Create stack as the project user so they own it.
+	// Stack ownership in Portainer is tied to the creating user — if we create
+	// as admin, the project user gets 403 on update/stop/delete.
 	fmt.Printf("Creating stack '%s'... ", stackName)
 	stackID, err = api.CreateLocalStack(globalCfg.PortainerEnvID, stackName, composeContent)
+	api.Token = savedToken // restore admin token after stack creation
 	if err != nil {
 		return 0, 0, "", 0, fmt.Errorf("failed to create stack: %w", err)
 	}

@@ -84,6 +84,7 @@ func (s *PortainerMCPServer) HandleDockerProxy() server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to send Docker API request", err), nil
 		}
+		defer response.Body.Close()
 
 		responseBody, err := io.ReadAll(response.Body)
 		if err != nil {

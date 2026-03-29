@@ -40,14 +40,16 @@ func (h *Handlers) updateComposeFile(stackID int, compose string) error {
 	}
 
 	var envVars []models.LocalStackEnvVar
+	var endpointID int
 	for _, s := range stacks {
 		if s.ID == stackID {
 			envVars = s.Env
+			endpointID = s.EndpointID
 			break
 		}
 	}
 
-	return h.Server.Client().UpdateLocalStack(stackID, h.EnvID, compose, envVars, false, false)
+	return h.Server.Client().UpdateLocalStack(stackID, endpointID, compose, envVars, false, false)
 }
 
 // getProxyManager returns the appropriate proxy backend based on the method parameter.

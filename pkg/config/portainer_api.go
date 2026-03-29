@@ -194,9 +194,9 @@ func (p *PortainerAPI) CreateUser(username, password string, role int) (int, err
 // AddTeamMember adds a user to a team.
 func (p *PortainerAPI) AddTeamMember(teamID, userID int) error {
 	payload, err := json.Marshal(map[string]any{
-		"teamID": teamID,
-		"userID": userID,
-		"role":   2, // team member
+		"TeamID": teamID,
+		"UserID": userID,
+		"Role":   2, // team member
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal membership payload: %w", err)

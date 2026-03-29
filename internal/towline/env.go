@@ -160,7 +160,7 @@ func (h *Handlers) HandleEnvSet() server.ToolHandlerFunc {
 		}
 
 		// Write back via UpdateLocalStack, preserving compose file
-		err = h.Server.Client().UpdateLocalStack(stack.ID, h.EnvID, composeFile, envVars, false, false)
+		err = h.Server.Client().UpdateLocalStack(stack.ID, stack.EndpointID, composeFile, envVars, false, false)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to update stack env", err), nil
 		}
