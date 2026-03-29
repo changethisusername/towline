@@ -11,16 +11,14 @@ export default function AgentDocs() {
   return (
     <>
       {/* Nav */}
-      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-border bg-bg/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight text-text">
-            <span className="text-accent">&#9650;</span> Towline
-          </Link>
-          <span className="text-sm text-text-secondary">Agent Documentation</span>
-        </div>
+      <nav className="mx-auto flex h-14 max-w-3xl items-center justify-between px-6 text-[13px]">
+        <Link href="/" className="font-medium tracking-tight text-text">
+          Towline
+        </Link>
+        <span className="text-text-muted">Agent Documentation</span>
       </nav>
 
-      <main className="mx-auto max-w-3xl px-6 pt-24 pb-20 prose-agent">
+      <main className="mx-auto max-w-3xl px-6 pt-8 pb-20 prose-agent">
         <h1>Towline Agent Documentation</h1>
         <p>
           This document is designed for AI agents (Claude Code, Cursor, Codex, Gemini CLI, Windsurf, etc.)
