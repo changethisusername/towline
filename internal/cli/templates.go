@@ -63,6 +63,36 @@ func renderTemplate(name string, data TemplateData, outputPath string) error {
 	return tmpl.Execute(f, data)
 }
 
+// renderTemplateToString renders a template to a string instead of a file.
+func renderTemplateToString(name string, data TemplateData) (string, error) {
+	home, _ := os.UserHomeDir()
+	userPath := filepath.Join(home, ".towline", "templates", name)
+
+	var tmplContent []byte
+	var err error
+
+	if _, statErr := os.Stat(userPath); statErr == nil {
+		tmplContent, err = os.ReadFile(userPath)
+	} else {
+		tmplContent, err = towline.EmbeddedTemplates.ReadFile("templates/" + name)
+	}
+	if err != nil {
+		return "", fmt.Errorf("template '%s' not found: %w", name, err)
+	}
+
+	tmpl, err := template.New(name).Parse(string(tmplContent))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
 // copySkillFile copies the DevOps skill file into the project directory.
 // It checks ~/.towline/skills/ first for user overrides, then falls back
 // to the embedded skill file.

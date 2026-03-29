@@ -17,14 +17,14 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	tier := fs.String("tier", "dev", "Deployment tier (dev or prod)")
 	tmpl := fs.String("template", "default", "Compose template name")
-	_ = fs.Bool("with-prod", false, "Also create a prod stack (not yet implemented, use towline promote)")
+	dir := fs.String("dir", "", "Use an existing directory instead of creating a new one")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: towline init [--tier dev|prod] [--template name] [--with-prod] <project-name>")
+		return fmt.Errorf("usage: towline init [--tier dev|prod] [--template name] [--dir path] <project-name>")
 	}
 
 	projectName := fs.Arg(0)
@@ -39,19 +39,29 @@ func runInit(args []string) error {
 		return err
 	}
 
-	projectDir := filepath.Join(globalCfg.ProjectsDir, projectName)
+	// Determine project directory and whether it's an existing codebase
+	existingDir := *dir != ""
+	var projectDir string
 
-	// Check if project directory already exists
-	if _, err := os.Stat(projectDir); err == nil {
-		return fmt.Errorf("project directory already exists: %s", projectDir)
+	if existingDir {
+		projectDir, err = filepath.Abs(*dir)
+		if err != nil {
+			return fmt.Errorf("failed to resolve directory path: %w", err)
+		}
+		if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+			return fmt.Errorf("directory does not exist: %s", projectDir)
+		}
+		fmt.Printf("Adding Towline to existing project '%s' in %s\n", projectName, projectDir)
+	} else {
+		projectDir = filepath.Join(globalCfg.ProjectsDir, projectName)
+		if _, err := os.Stat(projectDir); err == nil {
+			return fmt.Errorf("project directory already exists: %s (use --dir to add Towline to an existing project)", projectDir)
+		}
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			return fmt.Errorf("failed to create project directory: %w", err)
+		}
+		fmt.Printf("Creating project '%s' in %s\n", projectName, projectDir)
 	}
-
-	// Create project directory
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		return fmt.Errorf("failed to create project directory: %w", err)
-	}
-
-	fmt.Printf("Creating project '%s' in %s\n", projectName, projectDir)
 
 	// Initialize Portainer API
 	api := config.NewPortainerAPI(globalCfg.PortainerURL)
@@ -61,7 +71,9 @@ func runInit(args []string) error {
 	stackName := projectName + "-" + *tier
 	teamID, userID, apiToken, stackID, err := provisionTier(api, globalCfg, projectName, stackName, *tmpl)
 	if err != nil {
-		os.RemoveAll(projectDir)
+		if !existingDir {
+			os.RemoveAll(projectDir)
+		}
 		return fmt.Errorf("failed to provision %s tier: %w", *tier, err)
 	}
 
@@ -77,7 +89,9 @@ func runInit(args []string) error {
 		if teamID > 0 {
 			_ = api.DeleteTeam(teamID)
 		}
-		os.RemoveAll(projectDir)
+		if !existingDir {
+			os.RemoveAll(projectDir)
+		}
 	}
 
 	// Resolve MCP binary path
@@ -106,15 +120,19 @@ func runInit(args []string) error {
 	// Render templates
 	fmt.Print("Generating project files... ")
 
+	// Always write MCP configs and agent instructions
 	templates := []struct {
 		name   string
 		output string
 	}{
-		{"agent-md.tmpl", filepath.Join(projectDir, "AGENT.md")},
 		{"claude-settings.tmpl", filepath.Join(projectDir, ".claude", "settings.json")},
 		{"cursor-mcp.tmpl", filepath.Join(projectDir, ".cursor", "mcp.json")},
 		{"gemini-settings.tmpl", filepath.Join(projectDir, ".gemini", "settings.json")},
-		{"gitignore.tmpl", filepath.Join(projectDir, ".gitignore")},
+	}
+	if !existingDir {
+		templates = append(templates,
+			struct{ name, output string }{"gitignore.tmpl", filepath.Join(projectDir, ".gitignore")},
+		)
 	}
 
 	for _, t := range templates {
@@ -124,47 +142,94 @@ func runInit(args []string) error {
 		}
 	}
 
-	// Check if template is a pack (has pack.yaml) or a simple compose template
-	pack, packDir, packErr := loadPack(*tmpl)
-	if packErr != nil {
+	// Write agent instructions: append to existing CLAUDE.md or create new one
+	agentMDContent, err := renderTemplateToString("agent-md.tmpl", data)
+	if err != nil {
 		cleanupPortainer()
-		return fmt.Errorf("failed to load template pack: %w", packErr)
+		return fmt.Errorf("failed to render agent instructions: %w", err)
 	}
 
-	if pack != nil {
-		// Template pack: use pack compose and copy pack skills
-		composeContent, err := readPackComposeContent(pack, packDir)
-		if err != nil {
-			cleanupPortainer()
-		return fmt.Errorf("failed to read pack compose: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
-			cleanupPortainer()
-		return fmt.Errorf("failed to write compose: %w", err)
-		}
-
-		// Apply pack skills
-		if err := applyPack(pack, packDir, projectDir); err != nil {
-			cleanupPortainer()
-		return fmt.Errorf("failed to apply pack: %w", err)
-		}
-
-		// Merge pack MCPs into agent config files
-		if len(pack.MCPs) > 0 {
-			mergePackMCPs(pack.MCPs, projectDir)
+	claudeMDPath := filepath.Join(projectDir, "CLAUDE.md")
+	if existingDir {
+		if _, statErr := os.Stat(claudeMDPath); statErr == nil {
+			// Append to existing CLAUDE.md
+			f, err := os.OpenFile(claudeMDPath, os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to open CLAUDE.md: %w", err)
+			}
+			_, err = f.WriteString("\n\n" + agentMDContent)
+			f.Close()
+			if err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to append to CLAUDE.md: %w", err)
+			}
+		} else {
+			// No existing CLAUDE.md — create one
+			if err := os.WriteFile(claudeMDPath, []byte(agentMDContent), 0644); err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to write CLAUDE.md: %w", err)
+			}
 		}
 	} else {
-		// Simple compose template
-		composeTemplate := "compose/" + *tmpl + ".yml"
-		if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
+		// New project — write CLAUDE.md (not AGENT.md)
+		if err := os.WriteFile(claudeMDPath, []byte(agentMDContent), 0644); err != nil {
 			cleanupPortainer()
-		return fmt.Errorf("failed to render compose template: %w", err)
+			return fmt.Errorf("failed to write CLAUDE.md: %w", err)
 		}
 	}
 
-	// Create .env.example
-	if err := os.WriteFile(filepath.Join(projectDir, ".env.example"), []byte("# Environment variables for "+projectName+"\n"), 0644); err != nil {
-		return fmt.Errorf("failed to create .env.example: %w", err)
+	// For new projects, write compose files and .env.example
+	// For existing dirs, only apply pack skills (skip compose and .env)
+	if !existingDir {
+		pack, packDir, packErr := loadPack(*tmpl)
+		if packErr != nil {
+			cleanupPortainer()
+			return fmt.Errorf("failed to load template pack: %w", packErr)
+		}
+
+		if pack != nil {
+			composeContent, err := readPackComposeContent(pack, packDir)
+			if err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to read pack compose: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to write compose: %w", err)
+			}
+			if err := applyPack(pack, packDir, projectDir); err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to apply pack: %w", err)
+			}
+			if len(pack.MCPs) > 0 {
+				mergePackMCPs(pack.MCPs, projectDir)
+			}
+		} else {
+			composeTemplate := "compose/" + *tmpl + ".yml"
+			if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to render compose template: %w", err)
+			}
+		}
+
+		if err := os.WriteFile(filepath.Join(projectDir, ".env.example"), []byte("# Environment variables for "+projectName+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to create .env.example: %w", err)
+		}
+	} else {
+		// Existing dir: still apply pack skills if a pack was specified
+		if *tmpl != "default" {
+			pack, packDir, packErr := loadPack(*tmpl)
+			if packErr == nil && pack != nil {
+				if err := applyPack(pack, packDir, projectDir); err != nil {
+					cleanupPortainer()
+					return fmt.Errorf("failed to apply pack skills: %w", err)
+				}
+				if len(pack.MCPs) > 0 {
+					mergePackMCPs(pack.MCPs, projectDir)
+				}
+			}
+		}
 	}
 
 	// Copy base DevOps skill (always included)
@@ -195,12 +260,14 @@ func runInit(args []string) error {
 		return fmt.Errorf("failed to save project config: %w", err)
 	}
 
-	// Git init + initial commit
-	fmt.Print("Initializing git repository... ")
-	if err := gitInit(projectDir); err != nil {
-		fmt.Printf("warning: %v\n", err)
-	} else {
-		fmt.Println("OK")
+	// Git init (skip for existing directories — they already have a repo)
+	if !existingDir {
+		fmt.Print("Initializing git repository... ")
+		if err := gitInit(projectDir); err != nil {
+			fmt.Printf("warning: %v\n", err)
+		} else {
+			fmt.Println("OK")
+		}
 	}
 
 	fmt.Println()

@@ -54,8 +54,8 @@ Commands:
   init <name>    Create a project: Portainer team, scoped API key, container stack,
                  MCP config, DevOps skill, compose file, and git repo
                  Flags: --template <name>  Compose template (api, web-app, default)
-                        --pack <name>      Template pack with skills (ai-stack, n8n)
                         --tier <dev|prod>  Deployment tier (default: dev)
+                        --dir <path>       Add Towline to an existing codebase
   list           List all Towline projects on this machine
   destroy <name> Remove a project: deletes team, API key, stack, and local files
   promote <name> Promote a project from dev to prod tier
