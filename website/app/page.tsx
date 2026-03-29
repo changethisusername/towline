@@ -85,19 +85,77 @@ export default function Home() {
           The token is bound to the specific tool and arguments — it can&apos;t be reused with different parameters.
         </p>
 
-        {/* Quick start */}
-        <h2 className="mt-10 text-[15px] font-semibold text-text">Quick start</h2>
-        <div className="mt-3 rounded-md border border-border bg-code-bg px-4 py-3.5">
-          <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`curl -fsSL towline.dev/install | sh
-towline setup                        # connect to Portainer
-towline init my-app --template api   # create project
-cd my-app && claude                  # agent deploys`}</code></pre>
+        {/* Step by step */}
+        <h2 className="mt-10 text-[15px] font-semibold text-text">Step by step</h2>
+
+        <h3 className="mt-4 text-[14px] font-semibold text-text">1. Install</h3>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
+          <code className="text-[13px] text-text-secondary">
+            <span className="select-none text-text-muted">$ </span>
+            <span className="text-text">curl -fsSL towline.dev/install | sh</span>
+          </code>
+        </div>
+        <p className="mt-2 text-[13px] text-text-muted">
+          Installs two binaries: <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline</code> (CLI) and <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline-mcp</code> (MCP server) to /usr/local/bin.
+          Run <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline help</code> to see all commands.
+        </p>
+
+        <h3 className="mt-6 text-[14px] font-semibold text-text">2. Connect to Portainer</h3>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
+          <code className="text-[13px] text-text-secondary">
+            <span className="select-none text-text-muted">$ </span>
+            <span className="text-text">towline setup</span>
+          </code>
+        </div>
+        <p className="mt-2 text-[13px] text-text-muted">
+          Interactive wizard. Asks for your Portainer URL, admin API key, and default environment ID.
+          Saves to <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">~/.towline/config.yaml</code>. Only needed once per machine.
+        </p>
+
+        <h3 className="mt-6 text-[14px] font-semibold text-text">3. Create a project</h3>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3.5">
+          <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`# Simple API project
+towline init my-api --template api
+
+# AI stack with Ollama + Open WebUI (includes AI ops skill)
+towline init my-ai --pack ai-stack
+
+# n8n automation (includes workflow ops skill)
+towline init my-workflows --pack n8n`}</code></pre>
+        </div>
+        <p className="mt-2 text-[13px] text-text-muted">
+          This creates the Portainer team, API key, and stack, writes the agent configuration,
+          installs skills, and initializes git. The project directory is ready for your agent.
+        </p>
+
+        <h3 className="mt-6 text-[14px] font-semibold text-text">4. Start your agent</h3>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
+          <code className="text-[13px] text-text-secondary">
+            <span className="select-none text-text-muted">$ </span>
+            <span className="text-text">cd my-api && claude</span>
+          </code>
+        </div>
+        <p className="mt-2 text-[13px] text-text-muted">
+          The agent reads <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">.claude/settings.json</code> which
+          launches <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline-mcp</code> automatically.
+          It picks up the DevOps skill from <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">CLAUDE.md</code>,
+          gets access to the MCP tools, and can deploy, debug, scale, and operate within the isolated stack.
+          For non-Claude agents, the MCP config is also generated for Cursor, Gemini CLI, etc.
+        </p>
+
+        <h3 className="mt-6 text-[14px] font-semibold text-text">5. Manage projects</h3>
+        <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3.5">
+          <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`towline list                 # see all projects
+towline status my-api        # stack state, tier, endpoint
+towline promote my-api       # move from dev to prod tier
+towline rotate-keys my-api   # rotate API key
+towline destroy my-api       # tear down everything`}</code></pre>
         </div>
 
         {/* Requirements */}
         <h2 className="mt-10 text-[15px] font-semibold text-text">Requirements</h2>
         <ul className="mt-2 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-disc pl-5">
-          <li>Portainer v2.28+ with API access</li>
+          <li>Portainer v2.28+ with API access (self-hosted or Portainer Cloud)</li>
           <li>Docker on the container host</li>
           <li>An MCP-compatible agent (Claude Code, Cursor, Codex, Gemini CLI, Windsurf)</li>
         </ul>
