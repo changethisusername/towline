@@ -120,11 +120,13 @@ func runInit(args []string) error {
 	// Render templates
 	fmt.Print("Generating project files... ")
 
-	// Always write MCP configs and agent instructions
+	// Write MCP configs: .mcp.json is the primary config (Claude Code reads this)
+	// Also write Cursor and Gemini configs for multi-agent support
 	templates := []struct {
 		name   string
 		output string
 	}{
+		{"mcp-json.tmpl", filepath.Join(projectDir, ".mcp.json")},
 		{"claude-settings.tmpl", filepath.Join(projectDir, ".claude", "settings.json")},
 		{"cursor-mcp.tmpl", filepath.Join(projectDir, ".cursor", "mcp.json")},
 		{"gemini-settings.tmpl", filepath.Join(projectDir, ".gemini", "settings.json")},
