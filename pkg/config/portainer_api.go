@@ -97,9 +97,11 @@ func (p *PortainerAPI) Authenticate(username, password string) (string, error) {
 }
 
 // GenerateAPIToken generates a long-lived API token for a user.
-func (p *PortainerAPI) GenerateAPIToken(userID int, description string) (string, error) {
+// The Portainer API requires the user's password to confirm token creation.
+func (p *PortainerAPI) GenerateAPIToken(userID int, description, password string) (string, error) {
 	payload, err := json.Marshal(map[string]string{
 		"description": description,
+		"password":    password,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal token payload: %w", err)

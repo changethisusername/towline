@@ -72,7 +72,7 @@ func runSetup(args []string) error {
 
 	// Generate API token
 	fmt.Print("Generating API token... ")
-	apiToken, err := api.GenerateAPIToken(userID, "towline-admin")
+	apiToken, err := api.GenerateAPIToken(userID, "towline-admin", password)
 	if err != nil {
 		return fmt.Errorf("failed to generate API token: %w", err)
 	}

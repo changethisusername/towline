@@ -273,7 +273,7 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 	// Generate API token for the user
 	// We need to authenticate as the new user to generate their token
 	fmt.Print("Generating project API token... ")
-	apiToken, err = api.GenerateAPIToken(userID, "towline-"+stackName)
+	apiToken, err = api.GenerateAPIToken(userID, "towline-"+stackName, password)
 	if err != nil {
 		return 0, 0, "", 0, fmt.Errorf("failed to generate API token: %w", err)
 	}
