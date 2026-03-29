@@ -71,6 +71,16 @@ func runDestroy(args []string) error {
 		}
 	}
 
+	// Delete service user
+	if projectCfg.UserID > 0 {
+		fmt.Printf("Deleting service user (ID: %d)... ", projectCfg.UserID)
+		if err := api.DeleteUser(projectCfg.UserID); err != nil {
+			fmt.Printf("warning: %v\n", err)
+		} else {
+			fmt.Println("OK")
+		}
+	}
+
 	// Delete team
 	if projectCfg.TeamID > 0 {
 		fmt.Printf("Deleting team (ID: %d)... ", projectCfg.TeamID)

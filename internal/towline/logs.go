@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // stripDockerLogHeaders removes the 8-byte multiplexed stream header that Docker
@@ -113,7 +113,7 @@ func (h *Handlers) HandleServiceLogs() server.ToolHandlerFunc {
 			}
 
 			if len(containers) > 1 {
-				allLogs.WriteString(fmt.Sprintf("--- %s (%s) ---\n", c.Service, c.ID[:12]))
+				allLogs.WriteString(fmt.Sprintf("--- %s (%s) ---\n", c.Service, truncateID(c.ID)))
 			}
 			allLogs.WriteString(logText)
 		}

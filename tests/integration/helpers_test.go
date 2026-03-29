@@ -203,8 +203,8 @@ func (m *mockPortainerClient) UpdateTeamName(id int, name string) error      { r
 func (m *mockPortainerClient) UpdateTeamMembers(id int, userIds []int) error { return nil }
 
 // User methods
-func (m *mockPortainerClient) GetUsers() ([]models.User, error)            { return nil, nil }
-func (m *mockPortainerClient) UpdateUserRole(id int, role string) error     { return nil }
+func (m *mockPortainerClient) GetUsers() ([]models.User, error)         { return nil, nil }
+func (m *mockPortainerClient) UpdateUserRole(id int, role string) error { return nil }
 
 // Settings methods
 func (m *mockPortainerClient) GetSettings() (models.PortainerSettings, error) {
@@ -304,7 +304,7 @@ func (m *mockPortainerClient) proxyDockerRequestRaw(opts models.DockerProxyReque
 			"cpu_stats": map[string]any{
 				"cpu_usage":        map[string]any{"total_usage": 2000000000.0},
 				"system_cpu_usage": 20000000000.0,
-				"online_cpus":     4.0,
+				"online_cpus":      4.0,
 			},
 			"precpu_stats": map[string]any{
 				"cpu_usage":        map[string]any{"total_usage": 1000000000.0},

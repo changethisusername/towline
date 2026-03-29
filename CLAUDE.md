@@ -71,8 +71,8 @@ POST /{id}/reject  — reject
 
 | Category | Tools | Side effects |
 |----------|-------|--------------|
-| Observation | `towline_service_health`, `towline_service_logs`, `towline_env_get`, `towline_domains_list`, `towline_deployments`, `portainer_list_containers`, `portainer_inspect_container`, `portainer_stack_status`, `portainer_stack_file` | None |
-| Action | `portainer_deploy_stack`, `towline_env_set`, `towline_domains_add/remove`, `towline_scale`, `portainer_restart/start/stop_container`, `towline_exec`, `portainer_delete_stack` | Mutations |
+| Observation | `towline_service_health`, `towline_service_logs`, `towline_env_get`, `towline_domains_list`, `towline_deployments`, `listLocalStacks`, `getLocalStackFile`, `dockerProxy` (GET) | None |
+| Action | `createLocalStack`, `updateLocalStack`, `towline_env_set`, `towline_domains_add/remove`, `towline_scale`, `startLocalStack`, `stopLocalStack`, `dockerProxy` (non-GET), `towline_exec`, `deleteLocalStack` | Mutations |
 
 ### Prod tier permission matrix
 
@@ -100,7 +100,7 @@ The project follows this roadmap:
 - **Agent-agnostic**: works with any MCP-compatible tool (Claude Code, Cursor, Codex, Gemini CLI, Windsurf).
 - **No cloud dependencies**: fully self-hostable. Runs wherever Portainer runs.
 - **Tool design principle**: every tool answers a developer question in one call. Agents should never need raw Docker API calls for common operations.
-- **Partial compose files are dangerous**: when updating a stack via `portainer_deploy_stack`, the COMPLETE compose file must be submitted. Portainer removes any service not included.
+- **Partial compose files are dangerous**: when updating a stack via `updateLocalStack`, the COMPLETE compose file must be submitted. Portainer removes any service not included.
 
 ## Prerequisites
 

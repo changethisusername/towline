@@ -52,12 +52,12 @@ func TestRegression_ApprovalTokenExpiry(t *testing.T) {
 	// handles expiry correctly by validating once (which removes it) and trying again.
 
 	// First validate: should succeed
-	pending := store.Validate(token)
+	pending := store.Validate(token, map[string]any{"id": float64(1)})
 	require.NotNil(t, pending)
 	assert.Equal(t, "updateLocalStack", pending.ToolName)
 
 	// Second validate with same token: should fail (token consumed)
-	pending = store.Validate(token)
+	pending = store.Validate(token, map[string]any{"id": float64(1)})
 	assert.Nil(t, pending, "token should be consumed after first use")
 
 	// Test expired token through middleware
@@ -93,7 +93,7 @@ func TestRegression_ApprovalTokenExpiry(t *testing.T) {
 		"approvalToken": freshToken,
 	})
 	text = resultText(t, result)
-	assert.Contains(t, text, "Invalid or expired approval token")
+	assert.Contains(t, text, "Invalid, expired, or mismatched approval token")
 }
 
 // TestRegression_CreateStackResolvesID verifies that after createLocalStack through
@@ -196,17 +196,35 @@ func TestRegression_DockerProxyGETAllowedInProd(t *testing.T) {
 
 // TestRegression_DockerProxyPOSTBlockedInProd verifies that Docker proxy POST requests
 // require approval in prod.
-func TestRegression_DockerProxyPOSTBlockedInProd(t *testing.T) {
+func TestRegression_DockerProxyPOSTRestartAllowedInProd(t *testing.T) {
 	mock := newMockClient()
 	env := newTestEnv(t, middleware.TierProd, mock)
 
 	handler := env.srv.HandleDockerProxy()
+
+	// Container restart/start/stop are Operational — no approval needed
 	result := env.call(t, "dockerProxy", handler, map[string]any{
 		"environmentId": float64(1),
 		"method":        "POST",
 		"dockerAPIPath": "/containers/owned-container-abc123/restart",
 	})
+	text := resultText(t, result)
+	assert.NotContains(t, text, "approval", "container restart should not require approval")
+	assert.False(t, result.IsError)
+}
 
+func TestRegression_DockerProxyPOSTExecBlockedInProd(t *testing.T) {
+	mock := newMockClient()
+	env := newTestEnv(t, middleware.TierProd, mock)
+
+	handler := env.srv.HandleDockerProxy()
+
+	// Non-operational POST (e.g., container rename) should require approval
+	result := env.call(t, "dockerProxy", handler, map[string]any{
+		"environmentId": float64(1),
+		"method":        "POST",
+		"dockerAPIPath": "/containers/owned-container-abc123/rename",
+	})
 	text := resultText(t, result)
 	assert.Contains(t, text, "Production operation requires approval")
 }
@@ -446,14 +464,14 @@ func TestRegression_ApprovalTokenTiming(t *testing.T) {
 	token := store.Request("testTool", map[string]any{})
 
 	// Use it once - should succeed
-	p := store.Validate(token)
+	p := store.Validate(token, map[string]any{})
 	require.NotNil(t, p)
 
 	// Small delay to ensure no timing issues
 	time.Sleep(10 * time.Millisecond)
 
 	// Use it again - should fail
-	p = store.Validate(token)
+	p = store.Validate(token, map[string]any{})
 	assert.Nil(t, p, "approval token should be single-use")
 }
 
@@ -556,10 +574,9 @@ func TestRegression_ListStacksEmptyResult(t *testing.T) {
 	require.NoError(t, err)
 
 	text := resultText(t, result)
-	// Should be a valid JSON null or empty array
-	assert.True(t,
-		text == "null" || text == "[]",
-		"expected null or empty array when no matching stacks, got: %s", text)
+	// Should be a valid JSON empty array
+	assert.Equal(t, "[]", text,
+		"expected empty array when no matching stacks, got: %s", text)
 }
 
 // TestRegression_DockerProxyContainerListFiltered verifies that the container list

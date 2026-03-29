@@ -5,11 +5,11 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/pkg/portainer/client"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 const (
@@ -102,6 +102,7 @@ type serverOptions struct {
 	client              PortainerClient
 	readOnly            bool
 	disableVersionCheck bool
+	skipTLSVerify       bool
 }
 
 // WithClient sets a custom client for the server.
@@ -125,6 +126,14 @@ func WithReadOnly(readOnly bool) ServerOption {
 func WithDisableVersionCheck(disable bool) ServerOption {
 	return func(opts *serverOptions) {
 		opts.disableVersionCheck = disable
+	}
+}
+
+// WithSkipTLSVerify skips TLS certificate verification for the Portainer connection.
+// Only use this for development with self-signed certificates.
+func WithSkipTLSVerify(skip bool) ServerOption {
+	return func(opts *serverOptions) {
+		opts.skipTLSVerify = skip
 	}
 }
 
@@ -163,7 +172,7 @@ func NewPortainerMCPServer(serverURL, token, toolsPath string, options ...Server
 	if opts.client != nil {
 		portainerClient = opts.client
 	} else {
-		portainerClient = client.NewPortainerClient(serverURL, token, client.WithSkipTLSVerify(true))
+		portainerClient = client.NewPortainerClient(serverURL, token, client.WithSkipTLSVerify(opts.skipTLSVerify))
 	}
 
 	if !opts.disableVersionCheck {

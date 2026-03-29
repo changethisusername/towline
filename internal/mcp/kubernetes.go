@@ -6,11 +6,11 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/internal/k8sutil"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func (s *PortainerMCPServer) AddKubernetesProxyFeatures() {

@@ -97,7 +97,37 @@ func TestTierGating_ProdInvalidToken(t *testing.T) {
 	require.NoError(t, err)
 
 	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "Invalid or expired approval token")
+	assert.Contains(t, text, "Invalid, expired, or mismatched approval token")
+}
+
+func TestTierGating_ProdTokenBoundToTool(t *testing.T) {
+	store := approval.NewStore()
+	defer store.Stop()
+
+	// Get a token for deleteLocalStack
+	deleteMW := NewTierGating(TierProd, store, "deleteLocalStack")
+	deleteHandler := deleteMW(passthroughHandler())
+
+	result, err := deleteHandler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+
+	text := result.Content[0].(mcp.TextContent).Text
+	tokenStart := strings.Index(text, `approvalToken: "`) + len(`approvalToken: "`)
+	tokenEnd := strings.Index(text[tokenStart:], `"`)
+	token := text[tokenStart : tokenStart+tokenEnd]
+
+	// Try to use the token on a different tool (updateLocalStack)
+	updateMW := NewTierGating(TierProd, store, "updateLocalStack")
+	updateHandler := updateMW(passthroughHandler())
+
+	result, err = updateHandler(context.Background(), makeRequest(map[string]any{
+		"approvalToken": token,
+	}))
+	require.NoError(t, err)
+
+	text = result.Content[0].(mcp.TextContent).Text
+	assert.Contains(t, text, "was issued for")
+	assert.Contains(t, text, "deleteLocalStack")
 }
 
 func TestTierGating_ProdReadToolPassthrough(t *testing.T) {

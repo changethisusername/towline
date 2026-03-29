@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	towline "github.com/changethisusername/towline"
@@ -90,11 +92,11 @@ func copySkillFile(projectDir string) error {
 
 // TemplatePack defines a template pack with compose, skills, and MCP configs.
 type TemplatePack struct {
-	Name        string                       `yaml:"name"`
-	Description string                       `yaml:"description"`
-	Compose     string                       `yaml:"compose"`
-	Skills      []string                     `yaml:"skills"`
-	MCPs        map[string]PackMCPConfig     `yaml:"mcps"`
+	Name        string                   `yaml:"name"`
+	Description string                   `yaml:"description"`
+	Compose     string                   `yaml:"compose"`
+	Skills      []string                 `yaml:"skills"`
+	MCPs        map[string]PackMCPConfig `yaml:"mcps"`
 }
 
 // PackMCPConfig defines an additional MCP server to include in agent configs.
@@ -175,11 +177,68 @@ func readPackComposeContent(pack *TemplatePack, packDir string) (string, error) 
 	return string(content), nil
 }
 
+// mergePackMCPs merges additional MCP server configurations from a template pack
+// into the agent settings files (.claude/settings.json, .cursor/mcp.json, .gemini/settings.json).
+func mergePackMCPs(mcps map[string]PackMCPConfig, projectDir string) {
+	configFiles := []string{
+		filepath.Join(projectDir, ".claude", "settings.json"),
+		filepath.Join(projectDir, ".cursor", "mcp.json"),
+		filepath.Join(projectDir, ".gemini", "settings.json"),
+	}
+
+	for _, cfgPath := range configFiles {
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			continue
+		}
+
+		var cfg map[string]any
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			continue
+		}
+
+		mcpServers, ok := cfg["mcpServers"].(map[string]any)
+		if !ok {
+			mcpServers = make(map[string]any)
+		}
+
+		for name, mcp := range mcps {
+			entry := map[string]any{
+				"command": mcp.Command,
+				"args":    mcp.Args,
+			}
+			if len(mcp.Env) > 0 {
+				entry["env"] = mcp.Env
+			}
+			mcpServers[name] = entry
+		}
+
+		cfg["mcpServers"] = mcpServers
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			continue
+		}
+
+		// Preserve original permissions
+		os.WriteFile(cfgPath, out, 0644)
+	}
+}
+
 // readPackFile reads a file from a pack directory (user or embedded).
 func readPackFile(packName, packDir, filename string) ([]byte, error) {
 	// If packDir is set, read from filesystem
 	if packDir != "" {
-		return os.ReadFile(filepath.Join(packDir, filename))
+		absPackDir, err := filepath.Abs(packDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve pack directory: %w", err)
+		}
+		target := filepath.Join(absPackDir, filename)
+		// Prevent path traversal: target must be within packDir
+		if !strings.HasPrefix(filepath.Clean(target), absPackDir+string(os.PathSeparator)) && filepath.Clean(target) != absPackDir {
+			return nil, fmt.Errorf("path traversal detected in pack file: %s", filename)
+		}
+		return os.ReadFile(target)
 	}
 
 	// Read from embedded

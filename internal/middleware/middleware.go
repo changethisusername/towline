@@ -14,7 +14,7 @@ const (
 type ToolCategory int
 
 const (
-	CategoryRead          ToolCategory = iota
+	CategoryRead ToolCategory = iota
 	CategoryOperational
 	CategoryConfiguration
 	CategoryDeploy
@@ -57,6 +57,7 @@ var toolCategories = map[string]ToolCategory{
 
 	// Operational - no approval
 	"startLocalStack": CategoryOperational,
+	"towline_scale":   CategoryOperational,
 
 	// Configuration - approval in prod
 	"towline_env_set":        CategoryConfiguration,
@@ -66,7 +67,6 @@ var toolCategories = map[string]ToolCategory{
 	// Deploy - approval in prod
 	"createLocalStack": CategoryDeploy,
 	"updateLocalStack": CategoryDeploy,
-	"towline_scale":    CategoryDeploy,
 
 	// Destructive - approval in prod
 	"stopLocalStack":   CategoryDestructive,

@@ -133,6 +133,13 @@ tools:
         description: Domain name to remove
         type: string
         required: true
+      - name: method
+        description: Proxy method. Auto-detected if omitted.
+        type: string
+        enum:
+          - traefik
+          - caddy
+          - cloudflare
       - name: approvalToken
         description: Approval token for prod tier operations
         type: string
@@ -155,9 +162,6 @@ tools:
         description: Number of replicas
         type: number
         required: true
-      - name: approvalToken
-        description: Approval token for prod tier operations
-        type: string
     annotations:
       title: Scale Service
       readOnlyHint: false

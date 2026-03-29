@@ -44,9 +44,17 @@ func (p *PortainerAPI) doRequest(method, path string, body []byte) (*http.Respon
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if p.Token != "" {
-		req.Header.Set("X-API-Key", p.Token)
+		// Portainer uses X-API-Key for long-lived API tokens and
+		// Authorization: Bearer for JWTs. JWTs have three dot-separated segments.
+		if strings.Count(p.Token, ".") == 2 {
+			req.Header.Set("Authorization", "Bearer "+p.Token)
+		} else {
+			req.Header.Set("X-API-Key", p.Token)
+		}
 	}
 
 	resp, err := p.client.Do(req)
@@ -320,6 +328,22 @@ func (p *PortainerAPI) DeleteTeam(teamID int) error {
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to delete team (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// DeleteUser deletes a Portainer user by ID.
+func (p *PortainerAPI) DeleteUser(userID int) error {
+	resp, err := p.doRequest("DELETE", fmt.Sprintf("/api/users/%d", userID), nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete user (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	return nil

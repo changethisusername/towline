@@ -128,9 +128,12 @@ func (h *Handlers) HandleDomainsAdd() server.ToolHandlerFunc {
 			return mcp.NewToolResultErrorFromErr("invalid domain parameter", err), nil
 		}
 
-		port, err := parser.GetInt("port", true)
+		port, err := parser.GetInt("port", false)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("invalid port parameter", err), nil
+		}
+		if port <= 0 {
+			port = 80
 		}
 
 		method, err := parser.GetString("method", false)

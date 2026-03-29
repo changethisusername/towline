@@ -24,7 +24,9 @@ func ConvertSettingsToPortainerSettings(rawSettings *apimodels.PortainereeSettin
 
 	s.Authentication.Method = convertAuthenticationMethod(rawSettings.AuthenticationMethod)
 	s.Edge.Enabled = rawSettings.EnableEdgeComputeFeatures
-	s.Edge.ServerURL = rawSettings.Edge.TunnelServerAddress
+	if rawSettings.Edge != nil {
+		s.Edge.ServerURL = rawSettings.Edge.TunnelServerAddress
+	}
 
 	return s
 }

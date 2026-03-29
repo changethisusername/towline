@@ -38,7 +38,7 @@ type caddyMatch struct {
 
 // caddyHandle represents a Caddy route handler.
 type caddyHandle struct {
-	Handler   string         `json:"handler"`
+	Handler   string          `json:"handler"`
 	Upstreams []caddyUpstream `json:"upstreams,omitempty"`
 }
 

@@ -1,8 +1,8 @@
 package models
 
 import (
-	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 	"github.com/changethisusername/towline/pkg/portainer/utils"
+	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 )
 
 type Environment struct {

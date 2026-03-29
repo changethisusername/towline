@@ -108,8 +108,23 @@ func NewPortainerClient(serverURL string, token string, opts ...ClientOption) *P
 		normalizedURL = "https://" + normalizedURL
 	}
 
+	// The SDK expects a bare host (no scheme) and a separate scheme option.
+	// Passing a full URL would produce double-scheme URLs like "https://https://host/api/...".
+	scheme := "https"
+	sdkHost := normalizedURL
+	if strings.HasPrefix(sdkHost, "https://") {
+		sdkHost = strings.TrimPrefix(sdkHost, "https://")
+		scheme = "https"
+	} else if strings.HasPrefix(sdkHost, "http://") {
+		sdkHost = strings.TrimPrefix(sdkHost, "http://")
+		scheme = "http"
+	}
+
 	return &PortainerClient{
-		cli: client.NewPortainerClient(serverURL, token, client.WithSkipTLSVerify(options.skipTLSVerify)),
+		cli: client.NewPortainerClient(sdkHost, token,
+			client.WithSkipTLSVerify(options.skipTLSVerify),
+			client.WithScheme(scheme),
+		),
 		rawCli: &rawHTTPClient{
 			serverURL: normalizedURL,
 			token:     token,

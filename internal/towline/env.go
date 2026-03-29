@@ -6,16 +6,20 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // shouldMaskEnvVar returns true if the variable name suggests it contains a secret.
 func shouldMaskEnvVar(name string) bool {
 	upper := strings.ToUpper(name)
-	sensitivePatterns := []string{"KEY", "SECRET", "PASSWORD", "TOKEN"}
+	sensitivePatterns := []string{
+		"KEY", "SECRET", "PASSWORD", "TOKEN",
+		"PASSPHRASE", "PRIVATE", "CREDENTIAL",
+		"API_KEY", "APIKEY",
+	}
 	for _, pattern := range sensitivePatterns {
 		if strings.Contains(upper, pattern) {
 			return true
@@ -34,6 +38,9 @@ type envVarDisplay struct {
 // It reads stack environment variables, masks sensitive values, and skips internal _TOWLINE_* vars.
 func (h *Handlers) HandleEnvGet() server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		parser := toolgen.NewParameterParser(request)
+		filterName, _ := parser.GetString("name", false)
+
 		stacks, err := h.Server.Client().GetLocalStacks()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to get stacks", err), nil
@@ -55,6 +62,11 @@ func (h *Handlers) HandleEnvGet() server.ToolHandlerFunc {
 		for _, env := range stack.Env {
 			// Skip internal towline variables
 			if strings.HasPrefix(env.Name, "_TOWLINE_") {
+				continue
+			}
+
+			// Filter by name if specified
+			if filterName != "" && env.Name != filterName {
 				continue
 			}
 

@@ -129,6 +129,11 @@ func runInit(args []string) error {
 		if err := applyPack(pack, packDir, projectDir); err != nil {
 			return fmt.Errorf("failed to apply pack: %w", err)
 		}
+
+		// Merge pack MCPs into agent config files
+		if len(pack.MCPs) > 0 {
+			mergePackMCPs(pack.MCPs, projectDir)
+		}
 	} else {
 		// Simple compose template
 		composeTemplate := "compose/" + *tmpl + ".yml"
@@ -203,7 +208,31 @@ func runInit(args []string) error {
 }
 
 // provisionTier creates Portainer resources for a project tier.
+// On partial failure, it cleans up any resources it already created.
 func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, projectName, stackName, tmpl string) (teamID, userID int, apiToken string, stackID int, err error) {
+	// Cleanup on failure: delete any resources we created if an error occurs
+	defer func() {
+		if err == nil {
+			return
+		}
+		if userID > 0 {
+			fmt.Printf("Cleaning up user (ID: %d)... ", userID)
+			if delErr := api.DeleteUser(userID); delErr != nil {
+				fmt.Printf("warning: %v\n", delErr)
+			} else {
+				fmt.Println("OK")
+			}
+		}
+		if teamID > 0 {
+			fmt.Printf("Cleaning up team (ID: %d)... ", teamID)
+			if delErr := api.DeleteTeam(teamID); delErr != nil {
+				fmt.Printf("warning: %v\n", delErr)
+			} else {
+				fmt.Println("OK")
+			}
+		}
+	}()
+
 	// Create team
 	teamName := "team-" + stackName
 	fmt.Printf("Creating team '%s'... ", teamName)

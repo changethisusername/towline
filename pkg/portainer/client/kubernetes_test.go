@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/portainer/client-api-go/v2/client"
 	"github.com/changethisusername/towline/pkg/portainer/models"
+	"github.com/portainer/client-api-go/v2/client"
 	"github.com/stretchr/testify/assert"
 )
 

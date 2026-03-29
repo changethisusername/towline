@@ -27,7 +27,7 @@ func TestStore_RequestAndValidate(t *testing.T) {
 
 	require.NotEmpty(t, token)
 
-	p := s.Validate(token)
+	p := s.Validate(token, args)
 	require.NotNil(t, p)
 	assert.Equal(t, "write_file", p.ToolName)
 	assert.Equal(t, args, p.Args)
@@ -41,11 +41,11 @@ func TestStore_ValidateConsumesToken(t *testing.T) {
 	token := s.Request("some_tool", nil)
 
 	// First validation succeeds
-	p := s.Validate(token)
+	p := s.Validate(token, nil)
 	require.NotNil(t, p)
 
 	// Second validation returns nil (token consumed)
-	p = s.Validate(token)
+	p = s.Validate(token, nil)
 	assert.Nil(t, p)
 }
 
@@ -53,7 +53,7 @@ func TestStore_InvalidToken(t *testing.T) {
 	s := NewStore()
 	defer s.Stop()
 
-	p := s.Validate("nonexistent_token")
+	p := s.Validate("nonexistent_token", nil)
 	assert.Nil(t, p)
 }
 
@@ -68,7 +68,7 @@ func TestStore_ExpiredToken(t *testing.T) {
 	s.pending[token].CreatedAt = time.Now().Add(-(TokenTTL + time.Minute))
 	s.mu.Unlock()
 
-	p := s.Validate(token)
+	p := s.Validate(token, map[string]any{"action": "delete"})
 	assert.Nil(t, p, "expired token should return nil")
 }
 
@@ -81,22 +81,22 @@ func TestStore_MultipleTokens(t *testing.T) {
 	token3 := s.Request("tool_c", map[string]any{"z": 3})
 
 	// Validate in reverse order
-	p3 := s.Validate(token3)
+	p3 := s.Validate(token3, map[string]any{"z": 3})
 	require.NotNil(t, p3)
 	assert.Equal(t, "tool_c", p3.ToolName)
 
-	p1 := s.Validate(token1)
+	p1 := s.Validate(token1, map[string]any{"x": 1})
 	require.NotNil(t, p1)
 	assert.Equal(t, "tool_a", p1.ToolName)
 
-	p2 := s.Validate(token2)
+	p2 := s.Validate(token2, map[string]any{"y": 2})
 	require.NotNil(t, p2)
 	assert.Equal(t, "tool_b", p2.ToolName)
 
 	// All consumed
-	assert.Nil(t, s.Validate(token1))
-	assert.Nil(t, s.Validate(token2))
-	assert.Nil(t, s.Validate(token3))
+	assert.Nil(t, s.Validate(token1, map[string]any{"x": 1}))
+	assert.Nil(t, s.Validate(token2, map[string]any{"y": 2}))
+	assert.Nil(t, s.Validate(token3, map[string]any{"z": 3}))
 }
 
 func TestStore_Stop(t *testing.T) {
@@ -109,7 +109,7 @@ func TestStore_Stop(t *testing.T) {
 	s.Stop()
 
 	// Existing token should still be retrievable
-	p := s.Validate(token)
+	p := s.Validate(token, nil)
 	require.NotNil(t, p)
 	assert.Equal(t, "tool", p.ToolName)
 }
@@ -120,8 +120,8 @@ func TestGenerateToken(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		tok := generateToken()
 
-		// Verify format: 8 hex characters (4 bytes = 8 hex digits)
-		assert.Len(t, tok, 8, "token should be 8 hex chars")
+		// Verify format: 32 hex characters (16 bytes = 32 hex digits)
+		assert.Len(t, tok, 32, "token should be 32 hex chars")
 		_, err := hex.DecodeString(tok)
 		assert.NoError(t, err, "token should be valid hex")
 

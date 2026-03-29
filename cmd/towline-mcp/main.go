@@ -47,6 +47,7 @@ func main() {
 	tierFlag := flag.String("tier", "", "Deployment tier: dev or prod")
 	proxyFlag := flag.String("proxy", "", "Proxy backend: traefik, caddy, or cloudflare (auto-detected if omitted)")
 	caddyAPIFlag := flag.String("caddy-api", "http://localhost:2019", "Caddy admin API URL")
+	skipTLSVerifyFlag := flag.Bool("skip-tls-verify", false, "Skip TLS certificate verification (for self-signed certs)")
 
 	flag.Parse()
 
@@ -94,6 +95,7 @@ func main() {
 		*serverFlag, *tokenFlag, toolsPath,
 		mcp.WithReadOnly(*readOnlyFlag),
 		mcp.WithDisableVersionCheck(*disableVersionCheckFlag),
+		mcp.WithSkipTLSVerify(*skipTLSVerifyFlag),
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create server")
@@ -136,6 +138,9 @@ func main() {
 
 		// Stack scoping
 		mws = append(mws, stackScoping.ForTool(toolName))
+
+		// Env filter: strip _TOWLINE_ prefixed env vars from create/update requests
+		mws = append(mws, middleware.NewEnvFilter(toolName))
 
 		// Container ownership (only for dockerProxy)
 		if toolName == "dockerProxy" {

@@ -58,7 +58,7 @@ func TestStackScoping_FilterListResult_NoMatches(t *testing.T) {
 	require.NoError(t, err)
 
 	text := result.Content[0].(mcp.TextContent).Text
-	assert.Equal(t, "null", text)
+	assert.Equal(t, "[]", text)
 }
 
 func TestStackScoping_ValidateStackID_Correct(t *testing.T) {

@@ -96,10 +96,10 @@ func (c *PortainerClient) GetLocalStackFile(id int) (string, error) {
 
 // updateLocalStackRequest is the request body for updating a local stack
 type updateLocalStackRequest struct {
-	StackFileContent string                   `json:"stackFileContent"`
+	StackFileContent string                    `json:"stackFileContent"`
 	Env              []models.LocalStackEnvVar `json:"env"`
-	Prune            bool                     `json:"prune"`
-	PullImage        bool                     `json:"pullImage"`
+	Prune            bool                      `json:"prune"`
+	PullImage        bool                      `json:"pullImage"`
 }
 
 // UpdateLocalStack updates a regular stack's compose file and environment variables.
@@ -138,8 +138,8 @@ func (c *PortainerClient) UpdateLocalStack(id, endpointId int, file string, env 
 
 // createLocalStackRequest is the request body for creating a local stack
 type createLocalStackRequest struct {
-	Name             string                   `json:"name"`
-	StackFileContent string                   `json:"stackFileContent"`
+	Name             string                    `json:"name"`
+	StackFileContent string                    `json:"stackFileContent"`
 	Env              []models.LocalStackEnvVar `json:"env,omitempty"`
 }
 

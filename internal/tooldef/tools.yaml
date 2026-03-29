@@ -812,6 +812,10 @@ tools:
           Example: {'Image': 'nginx:latest', 'Name': 'my-container'}"
         type: string
         required: false
+      - name: approvalToken
+        description: Approval token for prod tier operations (required for non-GET, non-operational requests in prod tier)
+        type: string
+        required: false
     annotations:
       title: Docker Proxy
       readOnlyHint: true

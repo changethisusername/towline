@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 	"github.com/changethisusername/towline/pkg/portainer/models"
+	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )

@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/changethisusername/towline/internal/approval"
-	"github.com/changethisusername/towline/internal/middleware"
 	"github.com/changethisusername/towline/internal/mcp"
+	"github.com/changethisusername/towline/internal/middleware"
 	"github.com/changethisusername/towline/internal/towline"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"

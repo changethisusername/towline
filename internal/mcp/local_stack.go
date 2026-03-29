@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // AddLocalStackFeatures registers the local (non-edge) stack tools with the MCP server.
@@ -59,7 +59,7 @@ func (s *PortainerMCPServer) HandleGetLocalStackFile() server.ToolHandlerFunc {
 	}
 }
 
-// parseEnvVars extracts environment variables from the request parameter
+// parseEnvVars extracts environment variables from the request parameter.
 func parseEnvVars(parser *toolgen.ParameterParser) ([]models.LocalStackEnvVar, error) {
 	rawEnv, err := parser.GetArrayOfObjects("env", false)
 	if err != nil {

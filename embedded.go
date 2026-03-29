@@ -2,7 +2,7 @@ package towline
 
 import "embed"
 
-//go:embed templates/* templates/packs/*/* templates/compose/*
+//go:embed all:templates
 var EmbeddedTemplates embed.FS
 
 //go:embed skills/*

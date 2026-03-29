@@ -3,8 +3,6 @@ package towline
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
-
 	"github.com/changethisusername/towline/pkg/portainer/models"
 )
 
@@ -92,7 +90,7 @@ func ResolveAllServices(proxyFn ProxyFunc, envID int, stackName string) ([]Conta
 		Path:          "/containers/json",
 		QueryParams: map[string]string{
 			"all":     "true",
-			"filters": url.QueryEscape(string(filterJSON)),
+			"filters": string(filterJSON),
 		},
 	})
 	if err != nil {

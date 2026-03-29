@@ -75,13 +75,20 @@ func (s *StackScoping) filterListResult(ctx context.Context, request mcp.CallToo
 		return result, err
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
+	if len(result.Content) == 0 {
+		return result, nil
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return result, nil
+	}
+	text := tc.Text
 	var stacks []map[string]any
 	if err := json.Unmarshal([]byte(text), &stacks); err != nil {
 		return result, nil
 	}
 
-	var filtered []map[string]any
+	filtered := []map[string]any{}
 	for _, stack := range stacks {
 		name, _ := stack["name"].(string)
 		if name == s.stackName {
@@ -130,7 +137,14 @@ func (s *StackScoping) handleCreate(ctx context.Context, request mcp.CallToolReq
 	}
 
 	// Parse created stack ID from result
-	text := result.Content[0].(mcp.TextContent).Text
+	if len(result.Content) == 0 {
+		return result, nil
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return result, nil
+	}
+	text := tc.Text
 	var createdID int
 	if _, scanErr := fmt.Sscanf(text, "Local stack created successfully with ID: %d", &createdID); scanErr == nil && createdID > 0 {
 		s.SetStackID(createdID)

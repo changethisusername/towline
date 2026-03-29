@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/portainer/utils"
+	apimodels "github.com/portainer/client-api-go/v2/pkg/models"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -40,13 +40,13 @@ func TestGetStacks(t *testing.T) {
 				{
 					ID:                  1,
 					Name:                "stack1",
-					CreatedAt:           time.Unix(now, 0).Format(time.RFC3339),
+					CreatedAt:           time.Unix(now, 0).UTC().Format(time.RFC3339),
 					EnvironmentGroupIds: []int{1, 2},
 				},
 				{
 					ID:                  2,
 					Name:                "stack2",
-					CreatedAt:           time.Unix(now, 0).Format(time.RFC3339),
+					CreatedAt:           time.Unix(now, 0).UTC().Format(time.RFC3339),
 					EnvironmentGroupIds: []int{3},
 				},
 			},

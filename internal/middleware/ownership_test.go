@@ -174,3 +174,51 @@ func TestContainerOwnership_FilterContainerList(t *testing.T) {
 		assert.Equal(t, "myapp", labels["com.docker.compose.project"])
 	}
 }
+
+func TestContainerOwnership_BlockedPaths(t *testing.T) {
+	proxyFn := func(opts models.DockerProxyRequestOptions) ([]byte, error) {
+		t.Fatal("proxy should not be called for blocked paths")
+		return nil, nil
+	}
+
+	tests := []struct {
+		path   string
+		method string
+		block  bool
+	}{
+		{"/networks/create", "POST", true},
+		{"/networks/abc123", "GET", false}, // GET is allowed
+		{"/volumes/create", "POST", true},
+		{"/swarm/init", "POST", true},
+		{"/secrets/create", "POST", true},
+		{"/exec/abc123/start", "POST", true},
+		{"/exec/abc123/json", "GET", false}, // GET is allowed
+		{"/images/create", "POST", true},
+		{"/containers/json", "GET", false}, // container list is allowed
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_%s", tt.method, tt.path), func(t *testing.T) {
+			ownership := NewContainerOwnership("myapp", 1, proxyFn)
+			mw := ownership.ForDockerProxy()
+
+			var called bool
+			handler := mw(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				called = true
+				return mcp.NewToolResultText("executed"), nil
+			})
+
+			result, err := handler(context.Background(), makeRequest(map[string]any{
+				"dockerAPIPath": tt.path,
+				"method":        tt.method,
+			}))
+			require.NoError(t, err)
+
+			if tt.block {
+				text := result.Content[0].(mcp.TextContent).Text
+				assert.Contains(t, text, "not allowed")
+				assert.False(t, called)
+			}
+		})
+	}
+}

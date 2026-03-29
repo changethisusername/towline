@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/changethisusername/towline/pkg/portainer/models"
+	"github.com/changethisusername/towline/pkg/toolgen"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/changethisusername/towline/pkg/portainer/models"
 )
 
 const (
@@ -30,9 +31,20 @@ type DeploymentEntry struct {
 // It reads deployment history from the _TOWLINE_DEPLOYMENTS stack env var.
 func (h *Handlers) HandleDeployments() server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		parser := toolgen.NewParameterParser(request)
+		limit, _ := parser.GetInt("limit", false)
+		if limit <= 0 {
+			limit = 10
+		}
+
 		entries, err := h.readDeployments()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to read deployments", err), nil
+		}
+
+		// Return only the most recent entries up to limit
+		if len(entries) > limit {
+			entries = entries[len(entries)-limit:]
 		}
 
 		jsonData, err := json.Marshal(entries)

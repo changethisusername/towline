@@ -71,7 +71,7 @@ func TestConvertEdgeStackToStack(t *testing.T) {
 			want: Stack{
 				ID:                  4,
 				Name:                "Recent Stack",
-				CreatedAt:           time.Unix(time.Now().Add(-24*time.Hour).Unix(), 0).Format(time.RFC3339),
+				CreatedAt:           time.Unix(time.Now().Add(-24*time.Hour).Unix(), 0).UTC().Format(time.RFC3339),
 				EnvironmentGroupIds: []int{1, 2},
 			},
 		},
@@ -258,9 +258,9 @@ func TestLocalStackStatusString(t *testing.T) {
 
 func TestLocalStackTypeString(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		stackType LocalStackType
-		want     string
+		want      string
 	}{
 		{"swarm", LocalStackTypeSwarm, "swarm"},
 		{"compose", LocalStackTypeCompose, "compose"},

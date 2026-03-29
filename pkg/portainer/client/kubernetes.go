@@ -3,8 +3,8 @@ package client
 import (
 	"net/http"
 
-	"github.com/portainer/client-api-go/v2/client"
 	"github.com/changethisusername/towline/pkg/portainer/models"
+	"github.com/portainer/client-api-go/v2/client"
 )
 
 // ProxyKubernetesRequest proxies a Kubernetes API request to a specific Portainer environment.

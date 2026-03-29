@@ -2,6 +2,7 @@ package towline
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -22,7 +23,6 @@ const (
 type execCreateRequest struct {
 	AttachStdout bool     `json:"AttachStdout"`
 	AttachStderr bool     `json:"AttachStderr"`
-	Detach       bool     `json:"Detach"`
 	Cmd          []string `json:"Cmd"`
 }
 
@@ -74,11 +74,10 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 		// Parse command into args (split by spaces, respecting basic quoting)
 		cmd := parseCommand(command)
 
-		// Create exec instance
+		// Create exec instance (Detach omitted so output is capturable)
 		execReq := execCreateRequest{
 			AttachStdout: true,
 			AttachStderr: true,
-			Detach:       true,
 			Cmd:          cmd,
 		}
 
@@ -107,9 +106,9 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			return mcp.NewToolResultError("exec create returned empty ID"), nil
 		}
 
-		// Start the exec instance
-		startBody := `{"Detach": true}`
-		_, err = h.proxyFn(models.DockerProxyRequestOptions{
+		// Start the exec instance (attached — captures stdout/stderr)
+		startBody := `{"Detach": false, "Tty": false}`
+		outputData, err := h.proxyFn(models.DockerProxyRequestOptions{
 			EnvironmentID: h.EnvID,
 			Method:        "POST",
 			Path:          fmt.Sprintf("/exec/%s/start", createResp.ID),
@@ -120,19 +119,27 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			return mcp.NewToolResultErrorFromErr("failed to start exec instance", err), nil
 		}
 
-		// Poll for completion
+		// Demux the Docker stream to extract stdout/stderr output
+		output := demuxDockerStream(outputData)
+
+		// Poll for exit code
 		deadline := time.Now().Add(execPollTimeout)
 		var exitCode int
 		completed := false
 
 		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return mcp.NewToolResultError("exec cancelled: " + ctx.Err().Error()), nil
+			default:
+			}
+
 			inspectData, err := h.proxyFn(models.DockerProxyRequestOptions{
 				EnvironmentID: h.EnvID,
 				Method:        "GET",
 				Path:          fmt.Sprintf("/exec/%s/json", createResp.ID),
 			})
 			if err != nil {
-				// Inspect may fail briefly after start; continue polling
 				time.Sleep(execPollInterval)
 				continue
 			}
@@ -153,34 +160,119 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 		}
 
 		if !completed {
-			return mcp.NewToolResultText(fmt.Sprintf(
+			result := fmt.Sprintf(
 				"Exec started (ID: %s) but did not complete within %s. Command may still be running.",
-				createResp.ID[:12], execPollTimeout,
-			)), nil
+				truncateID(createResp.ID), execPollTimeout,
+			)
+			if output != "" {
+				result += "\n\nPartial output:\n" + output
+			}
+			return mcp.NewToolResultText(result), nil
 		}
 
-		result := fmt.Sprintf("Command executed on %s (container %s). Exit code: %d",
-			service, containerID[:12], exitCode)
+		var result strings.Builder
+		fmt.Fprintf(&result, "Command executed on %s (container %s). Exit code: %d\n",
+			service, truncateID(containerID), exitCode)
 
 		if exitCode != 0 {
-			result += " (non-zero exit code indicates failure)"
+			result.WriteString("(non-zero exit code indicates failure)\n")
 		}
 
-		return mcp.NewToolResultText(result), nil
+		if output != "" {
+			result.WriteString("\nOutput:\n")
+			result.WriteString(output)
+		}
+
+		return mcp.NewToolResultText(result.String()), nil
 	}
 }
 
-// parseCommand splits a command string into arguments, handling basic quoting.
+// parseCommand splits a command string into arguments using shell-like lexing
+// without invoking a shell. Pipe, redirect, and other shell metacharacters are
+// treated as literal characters — commands requiring shell semantics must
+// explicitly pass ["sh", "-c", "<command>"] via the Cmd field.
 func parseCommand(command string) []string {
-	// Use shell-like splitting: wrap in sh -c for complex commands
-	if strings.ContainsAny(command, "|&;><$`") {
-		return []string{"sh", "-c", command}
-	}
-
-	// Simple space splitting for basic commands
-	parts := strings.Fields(command)
+	parts := shellSplit(command)
 	if len(parts) == 0 {
-		return []string{"sh", "-c", command}
+		return []string{"echo", "empty command"}
 	}
 	return parts
+}
+
+// shellSplit performs basic POSIX-like shell lexing: it splits on whitespace,
+// respects single and double quotes, and handles backslash escapes.
+func shellSplit(s string) []string {
+	var args []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for _, r := range s {
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if r == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if r == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if (r == ' ' || r == '\t') && !inSingle && !inDouble {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteRune(r)
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
+}
+
+// demuxDockerStream parses Docker's multiplexed stream format (used when Tty=false).
+// Each frame has an 8-byte header: [stream_type, 0, 0, 0, size(4 bytes big-endian)]
+// followed by the payload. Stream type 1 = stdout, 2 = stderr.
+func demuxDockerStream(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	var output strings.Builder
+	i := 0
+	for i+8 <= len(data) {
+		size := binary.BigEndian.Uint32(data[i+4 : i+8])
+		i += 8
+		end := i + int(size)
+		if end > len(data) {
+			end = len(data)
+		}
+		output.Write(data[i:end])
+		i = end
+	}
+
+	// If no valid frames were parsed, treat as raw text (e.g., Tty=true output)
+	if output.Len() == 0 && len(data) > 0 {
+		return string(data)
+	}
+	return strings.TrimRight(output.String(), "\n")
+}
+
+// truncateID safely truncates a Docker ID to 12 characters for display.
+func truncateID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }

@@ -7,10 +7,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // ServiceHealth represents the health status of a compose service container.
@@ -23,6 +23,8 @@ type ServiceHealth struct {
 	MemoryUsageMB float64 `json:"memory_usage_mb"`
 	MemoryLimitMB float64 `json:"memory_limit_mb"`
 	ExitCode      *int    `json:"exit_code,omitempty"`
+	StatsError    string  `json:"stats_error,omitempty"`
+	InspectError  string  `json:"inspect_error,omitempty"`
 }
 
 // containerStats is the parsed Docker stats JSON.
@@ -83,10 +85,10 @@ func parseContainerStats(data []byte) (*containerStats, error) {
 func parseInspectInfo(data []byte) (restartCount int, uptime string, exitCode *int) {
 	var raw struct {
 		State struct {
-			StartedAt    string `json:"StartedAt"`
-			FinishedAt   string `json:"FinishedAt"`
-			ExitCode     int    `json:"ExitCode"`
-			Running      bool   `json:"Running"`
+			StartedAt  string `json:"StartedAt"`
+			FinishedAt string `json:"FinishedAt"`
+			ExitCode   int    `json:"ExitCode"`
+			Running    bool   `json:"Running"`
 		} `json:"State"`
 		RestartCount int `json:"RestartCount"`
 	}
@@ -151,12 +153,14 @@ func (h *Handlers) HandleServiceHealth() server.ToolHandlerFunc {
 				Path:          fmt.Sprintf("/containers/%s/stats", c.ID),
 				QueryParams:   map[string]string{"stream": "false"},
 			})
-			if err == nil {
-				if stats, parseErr := parseContainerStats(statsData); parseErr == nil {
-					health.CpuPercent = stats.CPUPercent
-					health.MemoryUsageMB = stats.MemoryUsageMB
-					health.MemoryLimitMB = stats.MemoryLimitMB
-				}
+			if err != nil {
+				health.StatsError = err.Error()
+			} else if stats, parseErr := parseContainerStats(statsData); parseErr != nil {
+				health.StatsError = parseErr.Error()
+			} else {
+				health.CpuPercent = stats.CPUPercent
+				health.MemoryUsageMB = stats.MemoryUsageMB
+				health.MemoryLimitMB = stats.MemoryLimitMB
 			}
 
 			// Get inspect info
@@ -165,7 +169,9 @@ func (h *Handlers) HandleServiceHealth() server.ToolHandlerFunc {
 				Method:        "GET",
 				Path:          fmt.Sprintf("/containers/%s/json", c.ID),
 			})
-			if err == nil {
+			if err != nil {
+				health.InspectError = err.Error()
+			} else {
 				health.RestartCount, health.Uptime, health.ExitCode = parseInspectInfo(inspectData)
 			}
 
