@@ -24,12 +24,17 @@ export default function Home() {
           Towline
         </h1>
         <p className="mt-3 text-[15px] leading-relaxed text-text-secondary">
-          An open-source CLI and MCP server that lets AI coding agents (Claude Code, Cursor, Codex, etc.)
+          An open-source toolkit that lets AI coding agents (Claude Code, Cursor, Codex, etc.)
           deploy and operate Docker containers on{" "}
           <a href="https://portainer.io" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text transition-colors">Portainer</a>-managed infrastructure.
-          Each project gets an isolated stack, scoped API credentials, and a set of MCP tools
-          for health checks, logs, env vars, domain routing, scaling, and exec.
+          It consists of four parts:
         </p>
+        <ol className="mt-3 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-decimal pl-5">
+          <li><strong className="text-text">towline CLI</strong> — scaffolds a new project: creates a Portainer team, scoped API key, container stack, agent config, compose files, and git repo.</li>
+          <li><strong className="text-text">towline-mcp</strong> — an MCP server (Go binary) that runs per-project, giving the agent 10 operational tools (health, logs, env vars, domains, scale, exec) plus upstream Portainer stack CRUD and Docker proxy, all scoped to a single stack.</li>
+          <li><strong className="text-text">DevOps skill</strong> — a markdown file (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">skills/towline-devops.md</code>) installed into every project that teaches the agent how to use the tools: deployment workflows, debugging patterns, rollback procedures, and the tier/approval model.</li>
+          <li><strong className="text-text">Template packs</strong> — bundles of compose files, domain-specific agent skills, and additional MCP configs. The <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">ai-stack</code> pack ships Ollama + Open WebUI with an AI operations skill; the <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">n8n</code> pack ships n8n + PostgreSQL with a workflow operations skill. Compose templates (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">api</code>, <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">web-app</code>) are also available without pack-level skills.</li>
+        </ol>
 
         {/* Install */}
         <div className="mt-8 rounded-md border border-border bg-code-bg px-4 py-3">
@@ -49,28 +54,24 @@ export default function Home() {
           anything outside its assigned scope.
         </p>
 
-        {/* What you get */}
-        <h2 className="mt-10 text-[15px] font-semibold text-text">What a project includes</h2>
-        <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">
-          Running <code className="text-[12px] bg-code-bg border border-border px-1.5 py-0.5 rounded">towline init my-app</code> creates:
-        </p>
-        <ul className="mt-2 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-disc pl-5">
-          <li>A Portainer team and API key scoped to one stack</li>
-          <li>A Docker Compose stack deployed on your chosen environment</li>
-          <li>An MCP server config (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">.claude/settings.json</code>) pointing to that stack</li>
-          <li>A project CLAUDE.md with tool documentation for the agent</li>
-          <li>A git repo with compose file and env template</li>
-        </ul>
+        {/* What a project looks like */}
+        <h2 className="mt-10 text-[15px] font-semibold text-text">What a project looks like</h2>
+        <div className="mt-3 rounded-md border border-border bg-code-bg px-4 py-3.5">
+          <pre className="text-[13px] leading-6 text-text-secondary overflow-x-auto"><code>{`~/projects/my-app/
+├── .claude/settings.json   # MCP config → launches towline-mcp
+├── CLAUDE.md               # Agent instructions for this project
+├── docker-compose.yml      # From template or pack
+├── .env.example
+├── skills/
+│   ├── towline-devops.md   # Base operational skill
+│   └── ai-ops.md           # Pack skill (if using ai-stack)
+└── .git/`}</code></pre>
+        </div>
         <p className="mt-3 text-[14px] leading-relaxed text-text-secondary">
-          The agent then has 10 MCP tools: <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_service_health</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_service_logs</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_env_get/set</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_domains_add/remove/list</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_scale</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_deployments</code>,{" "}
-          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline_exec</code>{" "}
-          — plus the upstream Portainer MCP tools for stack CRUD and Docker proxy.
-          Each tool answers one operational question in a single call.
+          The skills are not documentation — they are agent training. The DevOps skill teaches
+          deployment workflows, debugging procedures, and how to use the approval system.
+          Pack skills add domain knowledge on top (e.g., the ai-stack skill teaches how to
+          pull Ollama models and manage Open WebUI).
         </p>
 
         {/* Tier system */}
