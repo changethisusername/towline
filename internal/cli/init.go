@@ -270,10 +270,17 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 	}
 	fmt.Println("OK")
 
-	// Generate API token for the user
-	// We need to authenticate as the new user to generate their token
+	// Generate API token for the user.
+	// Portainer requires authenticating AS the user to generate their token.
 	fmt.Print("Generating project API token... ")
+	savedToken := api.Token
+	userJWT, err := api.Authenticate(username, password)
+	if err != nil {
+		return 0, 0, "", 0, fmt.Errorf("failed to authenticate as project user: %w", err)
+	}
+	api.Token = userJWT
 	apiToken, err = api.GenerateAPIToken(userID, "towline-"+stackName, password)
+	api.Token = savedToken // restore admin token for remaining operations
 	if err != nil {
 		return 0, 0, "", 0, fmt.Errorf("failed to generate API token: %w", err)
 	}
