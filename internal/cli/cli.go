@@ -4,9 +4,12 @@ import (
 	"fmt"
 )
 
+// Version is set by main.go before calling Run.
+var Version string
+
 func Run(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: towline <command> [args]\nCommands: setup, init, list, destroy, promote, rotate-keys, status")
+		return fmt.Errorf("usage: towline <command> [args]\nCommands: setup, init, list, destroy, promote, rotate-keys, status, update")
 	}
 
 	switch args[0] {
@@ -24,6 +27,8 @@ func Run(args []string) error {
 		return runRotateKeys(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}

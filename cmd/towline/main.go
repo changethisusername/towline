@@ -29,6 +29,7 @@ func main() {
 		return
 	}
 
+	cli.Version = Version
 	if err := cli.Run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
@@ -62,6 +63,9 @@ Commands:
   promote <name> Promote a project from dev to prod tier
   rotate-keys    Rotate the Portainer API key for a project
   status <name>  Show project status (stack state, tier, endpoint)
+  update         Update towline to the latest release from GitHub
+                 Flags: --check  Only check for updates, don't install
+                        --force  Force update even if already on latest
   help           Show this help message
   version        Show version information
 
