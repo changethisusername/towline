@@ -241,7 +241,7 @@ func (p *PortainerAPI) SetEndpointTeamAccess(endpointID, teamID int) error {
 		teamAccessPolicies = existing
 	}
 	teamAccessPolicies[fmt.Sprintf("%d", teamID)] = map[string]any{
-		"RoleId": 0, // environment access
+		"RoleId": 1, // environment administrator — needed for stack CRUD
 	}
 
 	payload, err := json.Marshal(map[string]any{
