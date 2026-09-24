@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -17,9 +18,9 @@ import (
 // a stack escape its container sandbox: privileged mode, host namespaces, host
 // bind mounts, device access, added capabilities, and file references that
 // read from the Portainer host filesystem.
-func NewComposePolicy(toolName string) MiddlewareFunc {
+func NewComposePolicy(toolName string, policy ComposePolicy) MiddlewareFunc {
 	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
-		if toolName != "createLocalStack" && toolName != "updateLocalStack" {
+		if policy.Disabled || (toolName != "createLocalStack" && toolName != "updateLocalStack") {
 			return next
 		}
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -28,17 +29,57 @@ func NewComposePolicy(toolName string) MiddlewareFunc {
 			if err != nil {
 				return mcp.NewToolResultErrorFromErr("invalid file parameter", err), nil
 			}
-			if violations := ValidateCompose(file); len(violations) > 0 {
-				return mcp.NewToolResultError("Compose file rejected by security policy:\n- " + strings.Join(violations, "\n- ")), nil
+			if violations := policy.Validate(file); len(violations) > 0 {
+				return mcp.NewToolResultError("Compose file rejected by security policy:\n- " + strings.Join(violations, "\n- ") +
+					"\nIf the stack genuinely needs this, ask your human partner: they can allow specific bind mounts (or disable the policy) under compose_policy in towline.json and run 'towline refresh'."), nil
 			}
 			return next(ctx, request)
 		}
 	}
 }
 
-// ValidateCompose checks compose content against the scoped-stack security
-// policy and returns a list of human-readable violations (empty if allowed).
+// ComposePolicy configures compose validation for a project. The zero value
+// is the strict default.
+type ComposePolicy struct {
+	// Disabled turns validation off entirely (set by a human per project).
+	Disabled bool
+	// AllowBindMounts lists host paths that may be bind mounted: an absolute
+	// path allows itself and everything below it; "." allows relative paths
+	// inside the stack directory.
+	AllowBindMounts []string
+}
+
+// allowsBind reports whether a bind mount source is on the allowlist.
+func (p ComposePolicy) allowsBind(source string) bool {
+	if source == "" || strings.ContainsAny(source, "$~\\") {
+		return false
+	}
+	for _, allowed := range p.AllowBindMounts {
+		if allowed == "." {
+			if !strings.HasPrefix(source, "/") && isSafeRelativePath(source) {
+				return true
+			}
+			continue
+		}
+		if !strings.HasPrefix(allowed, "/") || !strings.HasPrefix(source, "/") {
+			continue
+		}
+		a, s := path.Clean(allowed), path.Clean(source)
+		if s == a || (a == "/" || strings.HasPrefix(s, a+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateCompose checks compose content against the strict default policy.
 func ValidateCompose(content string) []string {
+	return ComposePolicy{}.Validate(content)
+}
+
+// Validate checks compose content against the scoped-stack security policy
+// and returns a list of human-readable violations (empty if allowed).
+func (p ComposePolicy) Validate(content string) []string {
 	var doc map[string]any
 	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 		return []string{fmt.Sprintf("compose file is not valid YAML: %v", err)}
@@ -59,7 +100,7 @@ func ValidateCompose(content string) []string {
 		if !ok {
 			continue
 		}
-		v = append(v, validateService(name, svc)...)
+		v = append(v, p.validateService(name, svc)...)
 	}
 
 	if vols, ok := doc["volumes"].(map[string]any); ok {
@@ -103,7 +144,7 @@ var forbiddenServiceKeys = []string{"cap_add", "devices", "device_cgroup_rules",
 // forbiddenBuildKeys give a build access to the host or to host secrets.
 var forbiddenBuildKeys = []string{"additional_contexts", "network", "entitlements", "privileged", "ssh", "secrets"}
 
-func validateService(name string, svc map[string]any) []string {
+func (p ComposePolicy) validateService(name string, svc map[string]any) []string {
 	var v []string
 	add := func(format string, args ...any) {
 		v = append(v, fmt.Sprintf("service %q: ", name)+fmt.Sprintf(format, args...))
@@ -151,7 +192,7 @@ func validateService(name string, svc map[string]any) []string {
 
 	if vols, ok := svc["volumes"].([]any); ok {
 		for _, raw := range vols {
-			if msg := checkServiceVolume(raw); msg != "" {
+			if msg := p.checkServiceVolume(raw); msg != "" {
 				add("%s", msg)
 			}
 		}
@@ -209,25 +250,29 @@ func isRemoteBuildContext(ctx string) bool {
 
 // checkServiceVolume returns a violation message if a service volume entry is
 // a bind mount (or cannot be proven to be a named volume / tmpfs).
-func checkServiceVolume(raw any) string {
+func (p ComposePolicy) checkServiceVolume(raw any) string {
 	switch vol := raw.(type) {
 	case string:
 		source, _, hasTarget := strings.Cut(vol, ":")
 		if !hasTarget {
 			return "" // anonymous volume
 		}
-		if !isNamedVolume(source) {
+		if !isNamedVolume(source) && !p.allowsBind(source) {
 			return fmt.Sprintf("bind mount %q is not allowed; use a named volume", vol)
 		}
 	case map[string]any:
 		typ, _ := vol["type"].(string)
+		source, _ := vol["source"].(string)
 		switch typ {
 		case "volume", "":
-			source, _ := vol["source"].(string)
-			if source != "" && !isNamedVolume(source) {
+			if source != "" && !isNamedVolume(source) && !p.allowsBind(source) {
 				return fmt.Sprintf("volume source %q is not allowed; use a named volume", source)
 			}
 		case "tmpfs":
+		case "bind":
+			if !p.allowsBind(source) {
+				return fmt.Sprintf("bind mount of %q is not allowed; use a named volume", source)
+			}
 		default:
 			return fmt.Sprintf("volume type %q is not allowed; use a named volume", typ)
 		}
@@ -273,4 +318,47 @@ func isSafeRelativePath(p string) bool {
 	}
 	clean := path.Clean(p)
 	return clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+// BindMountSources returns the host paths bind mounted by services in a
+// compose file (short and long volume syntax), in order of appearance.
+func BindMountSources(content string) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return nil
+	}
+	services, _ := doc["services"].(map[string]any)
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		svc, _ := services[name].(map[string]any)
+		vols, _ := svc["volumes"].([]any)
+		for _, raw := range vols {
+			var source string
+			switch vol := raw.(type) {
+			case string:
+				src, _, hasTarget := strings.Cut(vol, ":")
+				if hasTarget && !isNamedVolume(src) {
+					source = src
+				}
+			case map[string]any:
+				typ, _ := vol["type"].(string)
+				src, _ := vol["source"].(string)
+				if typ == "bind" || ((typ == "" || typ == "volume") && src != "" && !isNamedVolume(src)) {
+					source = src
+				}
+			}
+			if source != "" && !seen[source] {
+				seen[source] = true
+				out = append(out, source)
+			}
+		}
+	}
+	return out
 }

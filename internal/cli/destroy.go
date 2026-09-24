@@ -24,8 +24,10 @@ func runDestroy(args []string) error {
 	}
 
 	projectName := fs.Arg(0)
-	if err := validateProjectName(projectName); err != nil {
-		return err
+	// Projects created before name validation may not match the init
+	// rules, so only reject names that could point outside the projects dir.
+	if projectName == "" || projectName == "." || projectName == ".." || strings.ContainsAny(projectName, `/\`) {
+		return fmt.Errorf("invalid project name %q", projectName)
 	}
 
 	// Load global config
@@ -69,8 +71,7 @@ func runDestroy(args []string) error {
 	}
 
 	// Initialize Portainer API
-	api := config.NewPortainerAPI(globalCfg.PortainerURL, globalCfg.SkipTLSVerify)
-	api.Token = globalCfg.PortainerAPIKey
+	api := newAdminAPI(globalCfg)
 
 	// Delete stack
 	if projectCfg.StackID > 0 {

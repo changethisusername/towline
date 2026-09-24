@@ -8,11 +8,15 @@
         "-stack", {{json .StackName}},
         "-tier", {{json .Tier}},
         "-disable-version-check"{{if .SkipTLSVerify}},
-        "-skip-tls-verify"{{end}}{{if and (eq .Tier "prod") .ApprovalWebhook}},
-        "-approval-webhook", {{json .ApprovalWebhook}}{{end}}
+        "-skip-tls-verify"{{end}}{{if eq .Tier "prod"}},
+        "-approval-mode", {{json .ApprovalMode}}{{if .ApprovalWebhook}},
+        "-approval-webhook", {{json .ApprovalWebhook}}{{end}}{{end}}{{if .ComposePolicyOff}},
+        "-compose-policy", "off"{{end}}{{if .AllowBindMounts}},
+        "-allow-bind-mounts", {{json .AllowBindMounts}}{{end}}
       ],
       "env": {
-        "TOWLINE_PORTAINER_TOKEN": {{json .APIToken}}
+        "TOWLINE_PORTAINER_TOKEN": {{json .APIToken}}{{if and (eq .Tier "prod") .ApprovalWebhookToken}},
+        "TOWLINE_APPROVAL_WEBHOOK_TOKEN": {{json .ApprovalWebhookToken}}{{end}}
       }
     }
   }

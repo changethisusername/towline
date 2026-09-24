@@ -30,7 +30,7 @@ func buildMiddlewareChain(
 	var mws []middleware.MiddlewareFunc
 
 	// Outermost: compose security policy
-	mws = append(mws, middleware.NewComposePolicy(toolName))
+	mws = append(mws, middleware.NewComposePolicy(toolName, middleware.ComposePolicy{}))
 
 	// Tier gating
 	mws = append(mws, middleware.NewTierGating(tier, gate, toolName))

@@ -53,7 +53,7 @@ volumes:
 		{name: "relative bind mount", compose: "services:\n  a:\n    image: x\n    volumes: [\"./data:/data\"]\n", wantErr: "bind mount"},
 		{name: "home bind mount", compose: "services:\n  a:\n    image: x\n    volumes: [\"~/x:/data\"]\n", wantErr: "bind mount"},
 		{name: "interpolated bind mount", compose: "services:\n  a:\n    image: x\n    volumes: [\"${SRC}:/data\"]\n", wantErr: "bind mount"},
-		{name: "long syntax bind", compose: "services:\n  a:\n    image: x\n    volumes:\n      - type: bind\n        source: /\n        target: /host\n", wantErr: "volume type"},
+		{name: "long syntax bind", compose: "services:\n  a:\n    image: x\n    volumes:\n      - type: bind\n        source: /\n        target: /host\n", wantErr: "bind mount of"},
 		{name: "long syntax volume with path source", compose: "services:\n  a:\n    image: x\n    volumes:\n      - type: volume\n        source: /etc\n        target: /host\n", wantErr: "volume source"},
 		{name: "volumes_from", compose: "services:\n  a:\n    image: x\n    volumes_from: [other]\n", wantErr: "volumes_from"},
 		{name: "local driver bind via driver_opts", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    driver_opts:\n      type: none\n      o: bind\n      device: /\n", wantErr: "driver_opts"},
@@ -109,7 +109,7 @@ func TestComposePolicyMiddleware(t *testing.T) {
 		return mcp.NewToolResultText("ok"), nil
 	}
 
-	handler := NewComposePolicy("updateLocalStack")(next)
+	handler := NewComposePolicy("updateLocalStack", ComposePolicy{})(next)
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{"file": "services:\n  a:\n    image: x\n    privileged: true\n"}
 	result, err := handler(context.Background(), req)
@@ -125,6 +125,68 @@ func TestComposePolicyMiddleware(t *testing.T) {
 
 	// Other tools pass straight through.
 	called = false
-	_, _ = NewComposePolicy("listLocalStacks")(next)(context.Background(), mcp.CallToolRequest{})
+	_, _ = NewComposePolicy("listLocalStacks", ComposePolicy{})(next)(context.Background(), mcp.CallToolRequest{})
 	assert.True(t, called)
+}
+
+func TestComposePolicy_AllowBindMounts(t *testing.T) {
+	policy := ComposePolicy{AllowBindMounts: []string{"/srv/app", "."}}
+	tests := []struct {
+		name    string
+		volume  string
+		allowed bool
+	}{
+		{"exact allowed path", "/srv/app:/data", true},
+		{"below allowed path", "/srv/app/uploads:/data", true},
+		{"sibling with shared prefix", "/srv/application:/data", false},
+		{"escape via dot-dot", "/srv/app/../../etc:/data", false},
+		{"other host path", "/etc:/data", false},
+		{"relative inside stack", "./config:/config", true},
+		{"relative escape", "../../data:/data", false},
+		{"interpolated", "${SRC}:/data", false},
+		{"docker socket", "/var/run/docker.sock:/var/run/docker.sock", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compose := "services:\n  a:\n    image: x\n    volumes: [\"" + tt.volume + "\"]\n"
+			assert.Equal(t, tt.allowed, len(policy.Validate(compose)) == 0, policy.Validate(compose))
+		})
+	}
+
+	long := "services:\n  a:\n    image: x\n    volumes:\n      - type: bind\n        source: /srv/app\n        target: /d\n"
+	assert.Empty(t, policy.Validate(long))
+
+	// Other rules still apply when bind mounts are allowed.
+	assert.NotEmpty(t, policy.Validate("services:\n  a:\n    image: x\n    privileged: true\n"))
+}
+
+func TestComposePolicy_Disabled(t *testing.T) {
+	called := false
+	handler := NewComposePolicy("updateLocalStack", ComposePolicy{Disabled: true})(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return mcp.NewToolResultText("ok"), nil
+	})
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"file": "services:\n  a:\n    image: x\n    privileged: true\n"}
+	_, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+func TestBindMountSources(t *testing.T) {
+	compose := `services:
+  b:
+    image: x
+    volumes:
+      - data:/data
+      - /srv/a:/a
+      - type: bind
+        source: ./cfg
+        target: /cfg
+  a:
+    image: x
+    volumes: ["/srv/a:/again", "/var/run/docker.sock:/var/run/docker.sock", "/anon"]
+`
+	assert.Equal(t, []string{"/srv/a", "/var/run/docker.sock", "./cfg"}, BindMountSources(compose))
+	assert.Nil(t, BindMountSources("services: ["))
 }

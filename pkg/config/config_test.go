@@ -110,3 +110,41 @@ func TestLoadProjectConfig_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no towline.json found")
 }
+
+func TestInsecureTLS(t *testing.T) {
+	skip, legacy := (&GlobalConfig{}).InsecureTLS()
+	assert.True(t, skip, "configs from earlier releases keep skipping verification")
+	assert.True(t, legacy)
+
+	f, tr := false, true
+	skip, legacy = (&GlobalConfig{SkipTLSVerify: &f}).InsecureTLS()
+	assert.False(t, skip)
+	assert.False(t, legacy)
+	skip, legacy = (&GlobalConfig{SkipTLSVerify: &tr}).InsecureTLS()
+	assert.True(t, skip)
+	assert.False(t, legacy)
+}
+
+func TestApprovalEffectiveMode(t *testing.T) {
+	assert.Equal(t, ApprovalModeAgent, ApprovalConfig{}.EffectiveMode())
+	assert.Equal(t, ApprovalModeHuman, ApprovalConfig{Mode: ApprovalModeHuman}.EffectiveMode())
+}
+
+func TestSaveConfigsTightenExistingPermissions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgPath := filepath.Join(home, ".towline", "config.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte("x: 1\n"), 0644))
+	require.NoError(t, SaveGlobalConfig(&GlobalConfig{PortainerURL: "u", PortainerAPIKey: "k"}))
+	info, err := os.Stat(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "towline.json"), []byte("{}"), 0644))
+	require.NoError(t, SaveProjectConfig(dir, &ProjectConfig{}))
+	info, err = os.Stat(filepath.Join(dir, "towline.json"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}

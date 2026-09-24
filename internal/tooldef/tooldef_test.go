@@ -66,3 +66,44 @@ func TestCreateToolsFileIfNotExists(t *testing.T) {
 		assert.False(t, exists, "Function should return false when an error occurs")
 	})
 }
+
+func TestEnsureToolsFile(t *testing.T) {
+	embedded := []byte("version: v1.3\ntools: []\n")
+
+	t.Run("creates missing file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tools.yaml")
+		status, err := EnsureToolsFile(path, embedded)
+		require.NoError(t, err)
+		assert.Equal(t, "created", status)
+		got, _ := os.ReadFile(path)
+		assert.Equal(t, embedded, got)
+	})
+
+	t.Run("upgrades older file with backup", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "tools.yaml")
+		old := []byte("version: v1.2\ntools: [custom]\n")
+		require.NoError(t, os.WriteFile(path, old, 0644))
+
+		status, err := EnsureToolsFile(path, embedded)
+		require.NoError(t, err)
+		assert.Contains(t, status, "upgraded from v1.2 to v1.3")
+		got, _ := os.ReadFile(path)
+		assert.Equal(t, embedded, got)
+		backup, _ := os.ReadFile(path + ".bak")
+		assert.Equal(t, old, backup)
+	})
+
+	t.Run("keeps same or newer file", func(t *testing.T) {
+		for _, v := range []string{"v1.3", "v2.0"} {
+			path := filepath.Join(t.TempDir(), "tools.yaml")
+			custom := []byte("version: " + v + "\ntools: [custom]\n")
+			require.NoError(t, os.WriteFile(path, custom, 0644))
+
+			status, err := EnsureToolsFile(path, embedded)
+			require.NoError(t, err)
+			assert.Equal(t, "up to date", status)
+			got, _ := os.ReadFile(path)
+			assert.Equal(t, custom, got)
+		}
+	})
+}

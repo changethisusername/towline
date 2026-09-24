@@ -70,8 +70,7 @@ func runInit(args []string) error {
 	}
 
 	// Initialize Portainer API
-	api := config.NewPortainerAPI(globalCfg.PortainerURL, globalCfg.SkipTLSVerify)
-	api.Token = globalCfg.PortainerAPIKey
+	api := newAdminAPI(globalCfg)
 
 	// Provision dev tier
 	stackName := projectName + "-" + *tier
@@ -100,30 +99,15 @@ func runInit(args []string) error {
 		}
 	}
 
-	// Resolve MCP binary path
-	mcpBinaryPath := "towline-mcp"
-	if exePath, err := os.Executable(); err == nil {
-		mcpDir := filepath.Dir(exePath)
-		candidate := filepath.Join(mcpDir, "towline-mcp")
-		if _, err := os.Stat(candidate); err == nil {
-			mcpBinaryPath = candidate
-		}
-	}
+	mcpBinaryPath := resolveMCPBinary()
 
 	// Template data for rendering
-	data := TemplateData{
-		ProjectName:     projectName,
-		StackName:       stackName,
-		Tier:            *tier,
-		PortainerURL:    globalCfg.PortainerURL,
-		EnvironmentID:   globalCfg.PortainerEnvID,
-		APIToken:        apiToken,
-		MCPBinaryPath:   mcpBinaryPath,
-		TeamID:          teamID,
-		UserID:          userID,
-		SkipTLSVerify:   globalCfg.SkipTLSVerify,
-		ApprovalWebhook: globalCfg.ApprovalWebhook,
-	}
+	data := projectTemplateData(globalCfg, projectName, &config.ProjectConfig{
+		StackName: stackName,
+		Tier:      *tier,
+		TeamID:    teamID,
+		UserID:    userID,
+	}, apiToken, mcpBinaryPath)
 
 	// Render templates
 	fmt.Print("Generating project files... ")
@@ -275,10 +259,18 @@ func runInit(args []string) error {
 	fmt.Printf("  Tier:      %s\n", *tier)
 	fmt.Println()
 	fmt.Println("Open the project in your editor to start using the MCP tools.")
-	if *tier == "prod" && globalCfg.ApprovalWebhook == "" {
+	if *tier == "prod" {
 		fmt.Println()
-		fmt.Println("Warning: no approval_webhook is set in ~/.towline/config.yaml. Prod operations")
-		fmt.Println("that need human approval (deploys, config changes, exec) will be refused.")
+		switch {
+		case globalCfg.Approval.EffectiveMode() == config.ApprovalModeAgent:
+			fmt.Println("Prod approvals: the agent confirms its own prod operations (agent mode).")
+			fmt.Println("For human approval, run 'towline approvals setup' and then 'towline refresh " + projectName + "'.")
+		case globalCfg.Approval.URL == "":
+			fmt.Println("Warning: human approval mode has no approval server URL; prod operations that")
+			fmt.Println("need approval will be refused. Run 'towline approvals setup'.")
+		default:
+			fmt.Printf("Prod approvals go to %s. Make sure 'towline approvals serve' (or your approval server) is running.\n", globalCfg.Approval.URL)
+		}
 	}
 
 	return nil

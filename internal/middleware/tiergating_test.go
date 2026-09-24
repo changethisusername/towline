@@ -266,3 +266,52 @@ func TestTierGating_UnknownToolDefaultsToConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, resultText(result), "requires human approval")
 }
+
+func TestTierGating_AgentMode(t *testing.T) {
+	gate := newGate(t, nil)
+	gate.Mode = ApprovalAgent
+	handler := NewTierGating(TierProd, gate, "deleteLocalStack")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(map[string]any{"id": 1}))
+	require.NoError(t, err)
+	text := resultText(result)
+	assert.Contains(t, text, "requires confirmation")
+	token := extractToken(t, text)
+
+	// Different arguments do not match the token.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 2, "approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched")
+
+	// A mismatched attempt consumes the token (single use), so request again.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 1}))
+	require.NoError(t, err)
+	token = extractToken(t, resultText(result))
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 1, "approvalToken": token}))
+	require.NoError(t, err)
+	assert.Equal(t, "executed", resultText(result))
+}
+
+func TestResolveApprovalMode(t *testing.T) {
+	tests := []struct {
+		explicit string
+		webhook  bool
+		want     ApprovalMode
+		wantErr  bool
+	}{
+		{"", false, ApprovalAgent, false},
+		{"", true, ApprovalHuman, false},
+		{"human", false, ApprovalHuman, false},
+		{"agent", true, ApprovalAgent, false},
+		{"robot", false, "", true},
+	}
+	for _, tt := range tests {
+		got, err := ResolveApprovalMode(tt.explicit, tt.webhook)
+		if tt.wantErr {
+			assert.Error(t, err)
+			continue
+		}
+		require.NoError(t, err)
+		assert.Equal(t, tt.want, got, "%q webhook=%v", tt.explicit, tt.webhook)
+	}
+}

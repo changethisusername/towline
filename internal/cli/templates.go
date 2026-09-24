@@ -26,8 +26,14 @@ type TemplateData struct {
 	UserID        int
 	// SkipTLSVerify adds -skip-tls-verify to MCP configs (self-signed certs).
 	SkipTLSVerify bool
-	// ApprovalWebhook is passed to prod-tier MCP servers as -approval-webhook.
-	ApprovalWebhook string
+	// ApprovalMode is passed to prod-tier MCP servers as -approval-mode.
+	ApprovalMode string
+	// ApprovalWebhook and ApprovalWebhookToken configure human approval.
+	ApprovalWebhook      string
+	ApprovalWebhookToken string
+	// ComposePolicyOff and AllowBindMounts relax the compose policy.
+	ComposePolicyOff bool
+	AllowBindMounts  string
 }
 
 // Permissions for generated files. Agent configs contain the project's

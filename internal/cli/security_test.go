@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,13 +20,15 @@ import (
 
 // fakePortainer is a minimal Portainer API for provisioning/destroy tests.
 type fakePortainer struct {
-	mu       sync.Mutex
-	failStep string // path prefix ("METHOD /path") whose request fails
-	deleted  []string
-	teams    map[int]string
-	users    map[int]string
-	stacks   map[int]config.StackInfo
-	requests []string
+	mu           sync.Mutex
+	failStep     string // path prefix ("METHOD /path") whose request fails
+	deleted      []string
+	teams        map[int]string
+	users        map[int]string
+	stacks       map[int]config.StackInfo
+	stackFiles   map[int]string
+	endpointPuts []string
+	requests     []string
 	// authTokens records the auth header used for each DELETE
 	deleteAuth []string
 }
@@ -54,6 +57,8 @@ func (f *fakePortainer) handler(t *testing.T) http.HandlerFunc {
 		case key == "GET /api/endpoints/1":
 			writeJSON(map[string]any{"Id": 1, "TeamAccessPolicies": map[string]any{}})
 		case key == "PUT /api/endpoints/1":
+			body, _ := io.ReadAll(r.Body)
+			f.endpointPuts = append(f.endpointPuts, string(body))
 			writeJSON(map[string]any{})
 		case key == "POST /api/users":
 			f.users[9] = "created"
@@ -66,6 +71,8 @@ func (f *fakePortainer) handler(t *testing.T) http.HandlerFunc {
 			writeJSON(map[string]any{"rawAPIKey": "ptr_project"})
 		case key == "POST /api/stacks/create/standalone/string":
 			writeJSON(map[string]any{"Id": 11})
+		case r.Method == "GET" && sscan(r.URL.Path, "/api/stacks/%d/file", &id):
+			writeJSON(map[string]any{"StackFileContent": f.stackFiles[id]})
 		case r.Method == "GET" && sscan(r.URL.Path, "/api/stacks/%d", &id):
 			s, ok := f.stacks[id]
 			if !ok {
@@ -212,7 +219,7 @@ func TestRenderMCPTemplates(t *testing.T) {
 		data TemplateData
 	}{
 		{"dev default", TemplateData{Tier: "dev", StackName: "app-dev", PortainerURL: "https://p:9443", APIToken: "ptr_\"x", MCPBinaryPath: "/bin/towline-mcp", ApprovalWebhook: "https://approve"}},
-		{"prod self-signed", TemplateData{Tier: "prod", StackName: "app-prod", PortainerURL: "https://p:9443", APIToken: "ptr_x", MCPBinaryPath: "towline-mcp", SkipTLSVerify: true, ApprovalWebhook: "https://approve"}},
+		{"prod self-signed", TemplateData{Tier: "prod", StackName: "app-prod", PortainerURL: "https://p:9443", APIToken: "ptr_x", MCPBinaryPath: "towline-mcp", SkipTLSVerify: true, ApprovalMode: "human", ApprovalWebhook: "https://approve", ApprovalWebhookToken: "wh"}},
 	} {
 		for _, tmpl := range []string{"mcp-json.tmpl", "cursor-mcp.tmpl", "gemini-settings.tmpl"} {
 			t.Run(tc.name+" "+tmpl, func(t *testing.T) {
@@ -374,6 +381,7 @@ func TestInit_EndToEndWithPack(t *testing.T) {
 		PortainerAPIKey: "ptr_admin",
 		PortainerEnvID:  1,
 		ProjectsDir:     projects,
+		SkipTLSVerify:   boolPtr(false),
 	}))
 	t.Chdir(t.TempDir()) // not an existing codebase
 
@@ -425,3 +433,5 @@ func TestInit_UnknownTemplateCreatesNothing(t *testing.T) {
 	assert.ErrorContains(t, err, "not found")
 	assert.Empty(t, f.requests, "no Portainer resources should be created")
 }
+
+func boolPtr(b bool) *bool { return &b }

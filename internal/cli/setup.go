@@ -159,22 +159,30 @@ func runSetup(args []string) error {
 		projectsDir = home + projectsDir[1:]
 	}
 
-	// Prompt for approval webhook (needed for prod-tier projects)
-	fmt.Print("Approval webhook URL for prod-tier projects (optional, press Enter to skip): ")
-	approvalWebhook, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("failed to read input: %w", err)
-	}
-	approvalWebhook = strings.TrimSpace(approvalWebhook)
-
 	// Save configuration
 	cfg := &config.GlobalConfig{
 		PortainerURL:    portainerURL,
 		PortainerAPIKey: apiToken,
 		PortainerEnvID:  envID,
 		ProjectsDir:     projectsDir,
-		SkipTLSVerify:   skipTLSVerify,
-		ApprovalWebhook: approvalWebhook,
+		SkipTLSVerify:   &skipTLSVerify,
+	}
+
+	// Prod approvals: keep existing settings on re-run, otherwise ask.
+	var approverToken string
+	if previous, err := config.LoadGlobalConfig(); err == nil && previous.Approval.Mode != "" {
+		cfg.Approval = previous.Approval
+		fmt.Printf("\nKeeping your prod approval settings (%s mode). Change them with 'towline approvals setup'.\n", previous.Approval.Mode)
+	} else {
+		fmt.Println()
+		mode, err := promptApprovalMode(reader)
+		if err != nil {
+			return err
+		}
+		approverToken, err = configureApprovals(cfg, approvalOptions{Mode: mode})
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := config.SaveGlobalConfig(cfg); err != nil {
@@ -191,6 +199,10 @@ func runSetup(args []string) error {
 	cfgPath, _ := config.GlobalConfigPath()
 	fmt.Printf("Config saved to %s\n", cfgPath)
 	fmt.Printf("Projects directory: %s\n", projectsDir)
+	if approverToken != "" || cfg.Approval.Mode == config.ApprovalModeAgent {
+		printApprovalSummary(cfg, approverToken)
+	}
+
 	fmt.Println()
 	fmt.Println("Next step: run 'towline init <project-name>' to create a project.")
 

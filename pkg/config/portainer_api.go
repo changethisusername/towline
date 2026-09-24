@@ -433,3 +433,14 @@ func (p *PortainerAPI) getJSON(path string, out any) error {
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
+// GetStackFile returns a stack's compose file content.
+func (p *PortainerAPI) GetStackFile(stackID int) (string, error) {
+	var out struct {
+		StackFileContent string `json:"StackFileContent"`
+	}
+	if err := p.getJSON(fmt.Sprintf("/api/stacks/%d/file", stackID), &out); err != nil {
+		return "", fmt.Errorf("failed to get stack file: %w", err)
+	}
+	return out.StackFileContent, nil
+}

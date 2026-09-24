@@ -169,6 +169,7 @@ func runUpdate(args []string) error {
 	}
 
 	fmt.Printf("\nTowline updated to %s\n", latestVersion)
+	fmt.Println("Run 'towline refresh --all' to apply this release's changes to your existing projects.")
 	return nil
 }
 

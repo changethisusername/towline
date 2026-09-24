@@ -55,7 +55,10 @@ func main() {
 	proxyFlag := flag.String("proxy", "", "Proxy backend: traefik, caddy, or cloudflare (auto-detected if omitted)")
 	caddyAPIFlag := flag.String("caddy-api", "http://localhost:2019", "Caddy admin API URL")
 	skipTLSVerifyFlag := flag.Bool("skip-tls-verify", false, "Skip TLS certificate verification (for self-signed certs)")
-	approvalWebhookFlag := flag.String("approval-webhook", "", "Approval server URL; required for prod-tier operations that need human approval")
+	approvalWebhookFlag := flag.String("approval-webhook", "", "Approval server URL used in human approval mode")
+	approvalModeFlag := flag.String("approval-mode", "", "Who approves prod operations: human (approval server) or agent (the agent confirms by re-calling). Default: human if -approval-webhook is set, else agent")
+	composePolicyFlag := flag.String("compose-policy", "enforce", "Compose security policy for stack create/update: enforce or off")
+	allowBindMountsFlag := flag.String("allow-bind-mounts", "", "Comma-separated host paths that stacks may bind mount (\".\" allows paths inside the stack directory)")
 
 	flag.Parse()
 
@@ -75,26 +78,45 @@ func main() {
 		log.Fatal().Msg("-tier must be 'dev' or 'prod'")
 	}
 
-	// Handle tools.yaml files
+	approvalMode, err := middleware.ResolveApprovalMode(*approvalModeFlag, *approvalWebhookFlag != "")
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid -approval-mode")
+	}
+
+	var composePolicy middleware.ComposePolicy
+	switch *composePolicyFlag {
+	case "enforce":
+	case "off":
+		composePolicy.Disabled = true
+		log.Warn().Msg("compose security policy is disabled for this stack")
+	default:
+		log.Fatal().Msg("-compose-policy must be 'enforce' or 'off'")
+	}
+	for _, p := range strings.Split(*allowBindMountsFlag, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			composePolicy.AllowBindMounts = append(composePolicy.AllowBindMounts, p)
+		}
+	}
+
+	// Handle tools.yaml files. Files written by an older version are
+	// upgraded in place (with a .bak copy) so projects pick up new tool
+	// definitions without manual steps.
 	toolsPath := *toolsFlag
 	if toolsPath == "" {
 		toolsPath = defaultToolsPath
 	}
-	exists, err := tooldef.CreateToolsFileIfNotExists(toolsPath)
+	status, err := tooldef.EnsureToolsFile(toolsPath, tooldef.ToolsFile)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create tools.yaml file")
+		log.Fatal().Err(err).Msg("failed to prepare tools.yaml file")
 	}
-	if exists {
-		log.Info().Msg("using existing tools.yaml file")
-	} else {
-		log.Info().Msg("created tools.yaml file")
-	}
+	log.Info().Str("path", toolsPath).Msg("tools file " + status)
 
 	towlineToolsPath := defaultTowlineToolsPath
-	_, err = tooldef.CreateTowlineToolsFileIfNotExists(towlineToolsPath)
+	status, err = tooldef.EnsureToolsFile(towlineToolsPath, tooldef.TowlineToolsFile)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create towline-tools.yaml file")
+		log.Fatal().Err(err).Msg("failed to prepare towline-tools.yaml file")
 	}
+	log.Info().Str("path", towlineToolsPath).Msg("tools file " + status)
 
 	log.Info().
 		Str("portainer-host", *serverFlag).
@@ -122,15 +144,19 @@ func main() {
 
 	// Create middleware instances
 	approvalStore := approval.NewStore()
-	gate := &middleware.ApprovalGate{Store: approvalStore, Project: *stackFlag}
-	if *approvalWebhookFlag != "" {
-		webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
-		if err != nil {
-			log.Fatal().Err(err).Msg("invalid -approval-webhook")
+	gate := &middleware.ApprovalGate{Mode: approvalMode, Store: approvalStore, Project: *stackFlag}
+	if approvalMode == middleware.ApprovalHuman {
+		if *approvalWebhookFlag != "" {
+			webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
+			if err != nil {
+				log.Fatal().Err(err).Msg("invalid -approval-webhook")
+			}
+			gate.Approver = webhook
+		} else if tier == middleware.TierProd {
+			log.Warn().Msg("human approval mode without -approval-webhook: prod operations that need approval will be refused")
 		}
-		gate.Approver = webhook
 	} else if tier == middleware.TierProd {
-		log.Warn().Msg("no -approval-webhook configured: prod operations that need approval will be refused")
+		log.Warn().Msg("agent approval mode: the agent confirms its own prod operations (run 'towline approvals setup' for human approval)")
 	}
 	stackScoping := middleware.NewStackScoping(*stackFlag)
 
@@ -160,7 +186,7 @@ func main() {
 
 		// Outermost: compose security policy, so a stack that would be
 		// rejected anyway never reaches the approval flow
-		mws = append(mws, middleware.NewComposePolicy(toolName))
+		mws = append(mws, middleware.NewComposePolicy(toolName, composePolicy))
 
 		// Tier gating
 		mws = append(mws, middleware.NewTierGating(tier, gate, toolName))

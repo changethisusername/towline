@@ -40,8 +40,8 @@ make fmt            # gofmt
 **towline-mcp** (Go binary, forked from github.com/portainer/portainer-mcp):
 - Runs per-project as an MCP server process spawned by the AI agent
 - Adds middleware layers on top of upstream Portainer MCP handlers (`internal/middleware`, chained in `cmd/towline-mcp/main.go`, outermost first):
-  - Compose security policy — rejects privileged mode, host namespaces, host bind mounts, devices, added capabilities, and host-file `secrets`/`configs`/`env_file` in create/update stack calls (dev and prod)
-  - Tier-based access control (`-tier dev|prod`) with approval webhook integration (`-approval-webhook` URL) — prod changes need a human's approval via the external approval server; with no webhook configured they are refused
+  - Compose security policy (`-compose-policy enforce|off`, `-allow-bind-mounts`) — rejects privileged mode, host namespaces, host bind mounts, devices, added capabilities, and host-file `secrets`/`configs`/`env_file` in create/update stack calls (dev and prod)
+  - Tier-based access control (`-tier dev|prod`) with approval modes (`-approval-mode human|agent`): `human` sends prod changes to an approval server (`-approval-webhook` URL) and refuses them if none is configured; `agent` lets the agent confirm its own operations by re-calling with the token. Unset keeps the pre-approval-server behavior (human if a webhook is set, else agent) so existing configs keep working
   - Stack-name scoping (`-stack` flag) — filters all API responses to a single stack
   - Env filter — agents cannot set `_TOWLINE_*` vars; updates carry the stack's internal vars over and record deployment history
   - Container ownership assertion — normalizes Docker API paths (version prefix, rejects `?`/`%`/`..`), allows only lifecycle mutations on the stack's own containers, and validates compose project labels before Docker proxy calls
@@ -49,9 +49,13 @@ make fmt            # gofmt
 - Fork additions are confined to new files (middleware package, config extensions) and modified entry point — no upstream handler changes
 - Exposes high-level tools (`towline_service_health`, `towline_service_logs`, `towline_env_get/set`, `towline_domains_*`, `towline_scale`, `towline_deployments`, `towline_exec`) on top of upstream's stack CRUD and Docker proxy
 
+**Approval server** (`towline approvals serve`, `internal/approval/server.go`): ships with the CLI. Implements the webhook contract for towline-mcp, plus a web UI (`/ui`) and approver API for humans, authenticated by an approver token whose SHA-256 is stored in `~/.towline/config.yaml`. The webhook token given to towline-mcp can submit and poll, never decide. Optional ntfy notifications.
+
 **towline CLI** (scaffolding tool):
 - `towline init <project>` creates: Portainer team + scoped API key + stack + `.claude/settings.json` + CLAUDE.md + compose files + git init
-- Global config lives in `~/.towline/config.yaml` (portainer_url, admin key, env ID, projects dir, default MCPs, skills)
+- Global config lives in `~/.towline/config.yaml` (portainer_url, admin key, env ID, projects dir, `skip_tls_verify`, `approval:` block)
+- `towline refresh [--all|name...]` upgrades existing projects in place: merges the towline entry into MCP configs (keeping other servers and user flags), fixes permissions/.gitignore, moves teams to the Standard user role, and grandfathers deployed bind mounts into `towline.json` `compose_policy`
+- `towline approvals setup|serve|list|approve|reject` configures and runs prod approvals
 - Templates in `~/.towline/templates/` are interpolated with `{{PROJECT_NAME}}`, `{{STACK_NAME}}`, `{{TIER}}`
 
 ### Three-layer permissions model
@@ -108,6 +112,7 @@ The project follows this roadmap:
 - **Untrusted agent input**: treat every tool argument as attacker-controlled. Validate paths, names, and compose content before they reach Portainer, Docker, or a proxy backend, and fail closed.
 - **Secrets on disk**: generated files containing the project token (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are written 0600 and gitignored. The CLI verifies TLS unless `skip_tls_verify` was chosen at setup.
 - **`towline.json` is agent-writable**: never trust its IDs with the admin key without re-verifying names against Portainer (see `towline destroy`).
+- **Never break existing installs**: new behavior must default to the previous behavior for configs that predate it (unset `skip_tls_verify` keeps skipping; unset approval mode keeps agent confirmation), and `towline refresh` is how projects opt in. Tool definition files carry a version and are auto-upgraded by towline-mcp; bump `version` in `internal/tooldef/*.yaml` when changing them.
 
 ## Prerequisites
 
