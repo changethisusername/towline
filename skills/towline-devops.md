@@ -11,10 +11,32 @@ the services within your project's stack. Treat this stack as your entire
 infrastructure.
 
 Your stack has a tier: dev or prod. In dev, you have full autonomy. In prod,
-destructive and configuration-changing actions require your human partner's
-approval. When a prod operation needs approval, the tool will return an
-approval token — present the operation details to your partner, and if they
-confirm, re-call the tool with the approvalToken parameter.
+deploys, configuration changes, exec, and destructive actions require a human
+to approve them through an external approval server. You cannot approve your
+own requests, and your partner saying "yes" in chat does not approve anything.
+
+## Prod approval flow
+
+1. Call the gated tool normally. The request is sent to the approval server
+   and the tool returns a message with an approvalToken (the request ID).
+   Nothing has run yet.
+2. Tell your partner exactly what the change does and ask them to approve it
+   in their approval system. Then STOP and wait for them to tell you they
+   have approved or rejected it.
+3. Only then re-call the same tool with IDENTICAL arguments plus the
+   approvalToken parameter:
+   - approved: the operation executes (the token is single-use).
+   - still pending: nothing runs. Wait for your partner again. Do NOT
+     re-call in a loop to poll.
+   - rejected: the operation is refused. Do not retry without discussing it
+     with your partner.
+4. Tokens are bound to the tool name and exact arguments and expire after 30
+   minutes. If you change any argument, or the token expires, call again
+   without approvalToken to create a new request.
+
+If the tool says no approval webhook is configured, prod operations that need
+approval are refused. Ask your partner to configure one, or to make the change
+themselves. Do not look for another tool to achieve the same change.
 
 ## Tool inventory
 
@@ -48,6 +70,16 @@ confirm, re-call the tool with the approvalToken parameter.
   containers). Prefer the higher-level towline tools above.
   - Parameters: environmentId, method, dockerAPIPath, queryParams, headers,
     body
+  - dockerAPIPath must be a plain path: no query strings, fragments,
+    %-encoding, backslashes, or ./.. / empty segments. Put query parameters
+    in queryParams. Version prefixes like /v1.43/ are fine.
+  - GET requests work on your stack's containers. The only mutations allowed
+    are POST /containers/{id}/{start|stop|restart|kill|pause|unpause|wait|
+    resize|rename|update} and DELETE /containers/{id}, on your own
+    containers. Container create, exec, archive upload, and anything on
+    networks, volumes, images, or system are rejected — use updateLocalStack
+    and towline_exec instead.
+  - Prod tier: start/stop/restart need no approval; other mutations do.
 
 ### Action tools (cause changes)
 
@@ -55,10 +87,14 @@ confirm, re-call the tool with the approvalToken parameter.
   the COMPLETE compose file. Include a description of what changed.
   - Parameters: id, endpointId, file (full compose YAML), env (array),
     prune (bool), pullImage (bool)
+  - Omit env to keep the stack's current environment variables.
+  - Every update is recorded in towline_deployments.
+  - The compose security policy applies (see below).
   - Prod tier: requires approval
 
 - towline_env_set — Update an environment variable. Service restart may be
-  needed to pick up the change.
+  needed to pick up the change. Recorded in towline_deployments (name only,
+  never the value).
   - Parameters: name (string), value (string)
   - Prod tier: requires approval
 
@@ -76,7 +112,7 @@ confirm, re-call the tool with the approvalToken parameter.
 - towline_scale — Scale a service to N replicas. Warns if the service has
   persistent volumes.
   - Parameters: service (string), replicas (int)
-  - Prod tier: requires approval
+  - Prod tier: no approval (operational)
 
 - towline_exec — Run a command inside a running container.
   - Parameters: service (string), command (string or array)
@@ -85,8 +121,31 @@ confirm, re-call the tool with the approvalToken parameter.
 - startLocalStack / stopLocalStack — Start or stop the entire stack.
   - Prod tier: stop requires approval
 
-- deleteLocalStack — Delete the entire stack.
+- deleteLocalStack — Delete the entire stack. Afterwards you can call
+  createLocalStack again without restarting the MCP server.
   - Prod tier: requires approval
+
+## Compose security policy
+
+createLocalStack and updateLocalStack reject compose files (in dev and prod)
+that use any of:
+
+- privileged, cap_add, devices
+- network_mode host or container:..., pid, ipc, uts, userns_mode, cgroup
+- security_opt with unconfined or disable
+- host bind mounts: absolute paths, ./relative, ~, or ${VAR} sources, and
+  long-syntax type: bind
+- volumes_from
+- volumes with driver_opts or a non-local driver
+- secrets or configs with file:
+- external_links
+- build from a local context (use a prebuilt image or a git/https context)
+- env_file outside the stack directory
+- top-level include or extends
+
+Use named volumes (or tmpfs) for storage and towline_env_set for config. If
+a compose file is rejected, fix it — don't try to work around the policy. If
+the stack genuinely needs one of these, tell your partner.
 
 ## Decision framework
 
@@ -145,7 +204,9 @@ it just adds another crash.
 3. Add the domain with towline_domains_add. Specify traefik, caddy, or
    cloudflare as the method depending on your proxy setup. For external
    access through Cloudflare Tunnels, use method: "cloudflare" and follow
-   the returned Cloudflare MCP instructions.
+   the returned Cloudflare MCP instructions. With Caddy, the service must
+   exist in your compose file, and a hostname already routed by another
+   route cannot be claimed.
 4. Verify with towline_domains_list.
 
 ### "Update a configuration value"
@@ -195,6 +256,12 @@ if postgres isn't ready.
 
 Scaling stateful services: Don't scale services with persistent volume mounts
 to multiple replicas. You'll get data corruption or mount conflicts.
+
+Polling for approval: Don't re-call a gated prod tool over and over while the
+approval is pending. Tell your partner what needs approving and wait for them.
+
+Bind mounts: Host paths (./data, /srv/app, ~/x) are rejected. Use named
+volumes.
 
 Ignoring exit codes: 137 = OOM killed (needs more memory). 1 = application
 error (check logs). 143 = SIGTERM (graceful shutdown, usually fine).

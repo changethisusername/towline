@@ -35,14 +35,20 @@ towline init my-app --with-prod
 
 # Direct prod project
 towline init my-app --tier prod
+
+# Template pack (compose + skills)
+towline init my-app --template ai-stack
 ```
 
+Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, `-` and `_`, starting with a letter or digit).
+
 Every `towline init` creates:
-- A Portainer team and user with scoped API key
+- A Portainer team (with the "Standard user" environment role) and user with scoped API key
 - A Docker Compose stack on your Portainer instance
 - Agent configuration files for Claude Code, Cursor, and Gemini CLI
 - The DevOps skill file that guides agent behavior
 - A git repository with an initial commit
+- A `.gitignore` that excludes token-bearing files (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`). In an existing codebase, missing entries are appended to its `.gitignore`.
 
 ### Listing projects
 
@@ -59,7 +65,7 @@ towline destroy my-app           # interactive confirmation
 towline destroy my-app --confirm # skip confirmation
 ```
 
-This removes the Portainer stack and team. Local files are preserved — delete them manually if needed.
+This removes the Portainer stack, service user, and team. Because `towline.json` lives in the project directory (which the agent can write), each ID in it is verified against Portainer before deletion: the stack must be named `<project>-<tier>`, the user `towline-<stack>`, and the team `team-<stack>`. Mismatches are skipped with a message. Local files are preserved — delete them manually if needed.
 
 ---
 
@@ -113,6 +119,26 @@ The most important thing to understand is that `updateLocalStack` requires the *
 1. Read current compose (`getLocalStackFile`)
 2. Modify it (add/change/remove services)
 3. Submit the full result (`updateLocalStack`)
+
+If `env` is omitted from `updateLocalStack`, the stack's current environment variables are kept (older versions wiped them). Internal `_TOWLINE_*` variables and deployment history are always preserved.
+
+After a successful `deleteLocalStack`, the agent can call `createLocalStack` again without restarting the MCP server.
+
+### Compose security policy
+
+In both dev and prod, `createLocalStack` and `updateLocalStack` reject compose files that could give a container access to the host:
+
+- `privileged`, `cap_add`, `devices`
+- `network_mode: host` or `container:...`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`
+- `security_opt` with `unconfined` or `disable`
+- Host bind mounts — absolute, relative (`./`), `~`, or `${VAR}` sources, and long-syntax `type: bind`
+- `volumes_from`
+- Volumes with `driver_opts` or a non-`local` driver
+- `secrets` / `configs` with `file:`
+- `env_file` outside the stack directory
+- Top-level `include` / `extends`
+
+Named volumes and `tmpfs` are fine. As a server-side backstop, you can also restrict non-admin users in Portainer's environment security settings (e.g. disable bind mounts and privileged mode for regular users) — project users are non-admins, so those settings apply to them.
 
 ---
 
@@ -174,10 +200,12 @@ labels:
 If you use Caddy, start `towline-mcp` with the `-caddy-api` flag pointing to your Caddy admin endpoint:
 
 ```json
-"args": ["-server", "...", "-token", "...", "-stack", "...", "-tier", "dev", "-proxy", "caddy", "-caddy-api", "http://caddy:2019"]
+"args": ["-server", "...", "-stack", "...", "-tier", "dev", "-proxy", "caddy", "-caddy-api", "http://caddy:2019"]
 ```
 
 Routes are managed via Caddy's admin API. TLS is handled automatically by Caddy.
+
+Because a Caddy instance is usually shared between projects, routes are namespaced per stack with IDs of the form `towline:<stack>:<service>:<domain>`. A project only sees and removes its own routes, the service must exist in the stack's compose file, and a hostname already routed by any other route cannot be claimed. Routes created by older Towline versions (IDs `towline-<service>-<domain>`) are no longer listed or managed — remove them manually via Caddy's admin API.
 
 ### Cloudflare Tunnels
 
@@ -193,7 +221,7 @@ The agent specifies `method: "cloudflare"` in the `towline_domains_add` call. To
 
 > "What domains are configured?"
 
-Calls `towline_domains_list` which scans the compose for Traefik labels, queries Caddy's admin API, or notes that Cloudflare tunnels are managed externally.
+Calls `towline_domains_list` which scans the compose for Traefik labels, queries Caddy's admin API (this stack's routes only), or notes that Cloudflare tunnels are managed externally.
 
 ---
 
@@ -211,7 +239,7 @@ Internal Towline variables (`_TOWLINE_*`) are hidden from the output.
 
 > "Set the DATABASE_URL to postgres://app:secret@db:5432/myapp"
 
-The agent calls `towline_env_set`. This updates the stack's environment variables in Portainer. A service restart is usually needed to pick up the change — the agent knows this from the DevOps skill.
+The agent calls `towline_env_set`. This updates the stack's environment variables in Portainer and records the change in deployment history (the variable name only, never the value). A service restart is usually needed to pick up the change — the agent knows this from the DevOps skill.
 
 **Important**: Set environment variables **before** deploying services that need them. If a compose file references a variable that doesn't exist, the service starts with an empty value.
 
@@ -223,7 +251,7 @@ The agent calls `towline_env_set`. This updates the stack's environment variable
 
 > "Show me the last 5 deployments"
 
-The agent calls `towline_deployments` which returns a chronological list of stack updates with:
+The agent calls `towline_deployments` which returns a chronological list of stack changes — every `updateLocalStack` and `towline_env_set` — with:
 - Timestamp
 - Description (what changed)
 - Diff (what lines were added/removed in the compose file)
@@ -319,15 +347,32 @@ Or promote an existing dev project later (coming in Phase 3):
 towline promote my-app  # not yet implemented
 ```
 
+### Configuring the approval server
+
+Prod-tier approval requires a **human** acting through an external approval server. `towline setup` asks for its URL (stored as `approval_webhook` in `~/.towline/config.yaml`), and `towline init --tier prod` / `--with-prod` passes it to the prod MCP server as `-approval-webhook <url>`. If it's missing, `towline init` warns you, and prod operations that need approval are **refused** (fail closed).
+
+If the approval server requires authentication, set `TOWLINE_APPROVAL_WEBHOOK_TOKEN` in the MCP server's environment; it's sent as a bearer token.
+
+The approval server must implement:
+
+```
+POST /       — receive approval request: {id, project, action, description, stackContent}
+GET  /{id}   — return {"status": "pending" | "approved" | "rejected"}
+```
+
+How a human approves or rejects (e.g. `POST /{id}/approve`, `POST /{id}/reject`, a chat bot, a web page) is up to the approval server. It **must authenticate whoever approves or rejects**, and its approve/reject endpoints must not be reachable by the agent.
+
 ### How approval works
 
-In prod tier, destructive and configuration-changing operations require your approval. When the agent tries to perform a gated operation:
+In prod tier, deploys, configuration changes, exec, and destructive operations require a human's approval. When the agent tries to perform a gated operation:
 
-1. The MCP returns an approval token with a description of what's about to happen
-2. The agent presents this to you in the chat
-3. You say "yes" (or "no")
-4. The agent re-calls the tool with the approval token
-5. The operation executes
+1. `towline-mcp` POSTs the request to the approval server and returns a message with an `approvalToken` (the request ID)
+2. The agent tells you what it wants to do and waits
+3. You approve (or reject) it in the approval server
+4. The agent re-calls the tool with identical arguments plus the `approvalToken`
+5. `towline-mcp` checks `GET /{id}`: if **approved**, the operation executes; if **pending**, nothing runs and the agent is told to keep waiting; if **rejected**, the call is refused
+
+Saying "yes" in the agent chat does not approve anything — only the approval server's status counts, so the agent can't approve its own requests.
 
 **What requires approval in prod:**
 
@@ -337,16 +382,16 @@ In prod tier, destructive and configuration-changing operations require your app
 | Deployments | Creating or updating the stack compose |
 | Destructive actions | Deleting or stopping the stack |
 | Command execution | Running exec inside containers |
-| Docker API writes | Non-GET Docker proxy calls |
+| Docker API writes | Allowed Docker proxy mutations other than start/stop/restart (e.g. kill, pause, rename, update, container delete) |
 
 **What does NOT require approval:**
 
 | Operation | Example |
 |-----------|---------|
 | Reading state | Health checks, log viewing, listing stacks |
-| Operational restarts | Starting a stack, container restarts |
+| Operational | Starting a stack, scaling, container start/stop/restart via Docker proxy |
 
-Approval tokens expire after 5 minutes. If you don't approve in time, the agent needs to request a new token.
+Approval tokens are single-use, bound to the tool name and exact arguments, and expire after 30 minutes. If you don't approve in time, the agent needs to request a new token.
 
 ---
 
@@ -366,7 +411,7 @@ Approval tokens expire after 5 minutes. If you don't approve in time, the agent 
 
 | Pack | Stack | Includes |
 |------|-------|----------|
-| `ai-stack` | Ollama + Open WebUI + PostgreSQL | AI ops skill, Ollama MCP config |
+| `ai-stack` | Ollama + Open WebUI + PostgreSQL | AI ops skill |
 | `n8n` | n8n + PostgreSQL | n8n ops skill |
 
 ### Creating custom compose templates
@@ -445,7 +490,7 @@ Add your compose file and skill files in the same directory:
 
 Use it: `towline init my-project --template my-pack`
 
-The pack's skills are copied alongside the base DevOps skill. The pack's MCP configs are merged into the generated agent settings files.
+The pack's skills are copied alongside the base DevOps skill. The pack's MCP configs are merged into the generated MCP config files (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`). Pack MCP servers start automatically with your privileges whenever the agent starts, so only use servers from verified publishers, pinned to an exact version.
 
 ### What goes in a skill file?
 
@@ -478,6 +523,8 @@ Available template variables:
 | `{{.EnvironmentID}}` | `2` |
 | `{{.APIToken}}` | `ptr_xxxx...` |
 | `{{.MCPBinaryPath}}` | `towline-mcp` |
+| `{{.SkipTLSVerify}}` | `false` |
+| `{{.ApprovalWebhook}}` | `https://approvals.mylab.local` |
 
 ---
 
@@ -485,11 +532,11 @@ Available template variables:
 
 Towline generates configuration for multiple agents simultaneously. Each project contains:
 
-- `.claude/settings.json` — for Claude Code
+- `.mcp.json` — for Claude Code (plus `.claude/settings.json` for permissions)
 - `.cursor/mcp.json` — for Cursor
 - `.gemini/settings.json` — for Gemini CLI
 
-All point to the same `towline-mcp` binary with the same stack and credentials. You can use any supported editor interchangeably.
+All point to the same `towline-mcp` binary with the same stack and credentials. You can use any supported editor interchangeably. The API token is passed in each config's `env` block as `TOWLINE_PORTAINER_TOKEN` rather than on the command line, and the files are written with `0600` permissions (directories `0700`).
 
 ### Adding support for other agents
 
@@ -497,10 +544,11 @@ The generic configuration is in `towline.json` at the project root. It contains 
 
 ```
 Command: towline-mcp
-Args: -server <url> -token <token> -stack <stack-name> -tier <tier>
+Args: -server <url> -stack <stack-name> -tier <tier> [-skip-tls-verify] [-approval-webhook <url>]
+Env:  TOWLINE_PORTAINER_TOKEN=<token>
 ```
 
-Read `towline.json` for the exact values for each project.
+Add `-skip-tls-verify` only for a self-signed Portainer certificate, and `-approval-webhook` for prod tier. `towline-mcp` still accepts `-token` for backward compatibility, but that exposes the token in the process list. Read `towline.json` for the exact values for each project.
 
 ---
 
@@ -508,10 +556,10 @@ Read `towline.json` for the exact values for each project.
 
 | Command | Description |
 |---------|-------------|
-| `towline setup` | Interactive first-run configuration. Connects to Portainer. |
+| `towline setup` | Interactive first-run configuration. Connects to Portainer (TLS verified unless you choose self-signed) and asks for an optional approval webhook URL. |
 | `towline init <name>` | Create a new project with Portainer provisioning. |
 | `towline list` | List all Towline-managed projects. |
-| `towline destroy <name>` | Delete Portainer resources for a project. |
+| `towline destroy <name>` | Delete Portainer resources for a project (IDs verified against Portainer first). |
 | `towline promote <name>` | Create prod tier from dev. *(Coming soon)* |
 | `towline rotate-keys <name>` | Rotate API keys. *(Coming soon)* |
 | `towline status <name>` | Show live stack health. *(Coming soon)* |
@@ -521,7 +569,7 @@ Read `towline.json` for the exact values for each project.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--tier` | `dev` | Deployment tier: `dev` or `prod` |
-| `--template` | `default` | Compose template name |
+| `--template` | `default` | Compose template or pack name |
 | `--with-prod` | `false` | Also create a prod stack |
 
 ### towline destroy flags
@@ -544,14 +592,14 @@ Read `towline.json` for the exact values for each project.
 | `towline_domains_list` | — | Domain mappings: service, domain, port, method |
 | `towline_deployments` | `limit` (default 10) | Deployment history with diffs |
 
-### Action tools (require prod approval)
+### Action tools (require prod approval, except `towline_scale`)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `towline_env_set` | `name`, `value` | Set env var. Restart may be needed. |
+| `towline_env_set` | `name`, `value` | Set env var (recorded in deployment history, name only). Restart may be needed. |
 | `towline_domains_add` | `service`, `domain`, `port`, `method` | Add domain via Traefik/Caddy/Cloudflare |
 | `towline_domains_remove` | `service`, `domain` | Remove domain routing |
-| `towline_scale` | `service`, `replicas` | Scale service replicas |
+| `towline_scale` | `service`, `replicas` | Scale service replicas (operational: no approval) |
 | `towline_exec` | `service`, `command` | Run command in container |
 
 ### Upstream Portainer tools (scoped to stack)
@@ -560,9 +608,15 @@ Read `towline.json` for the exact values for each project.
 |------|-------------|
 | `listLocalStacks` | List stacks (filtered to project) |
 | `getLocalStackFile` | Get current compose YAML |
-| `createLocalStack` | Create new stack |
-| `updateLocalStack` | Update compose (submit COMPLETE file) |
+| `createLocalStack` | Create new stack (compose security policy applies; prod: approval required) |
+| `updateLocalStack` | Update compose (submit COMPLETE file; omitting `env` keeps current vars; prod: approval required) |
 | `startLocalStack` | Start the stack |
 | `stopLocalStack` | Stop the stack (prod: approval required) |
 | `deleteLocalStack` | Delete the stack (prod: approval required) |
-| `dockerProxy` | Raw Docker API access (scoped to stack containers) |
+| `dockerProxy` | Raw Docker API access (scoped to stack containers; see below) |
+
+### dockerProxy limits
+
+In scoped mode, `dockerAPIPath` must be a plain path: query strings, fragments, `%`-encoding, backslashes, and `.`/`..` or empty segments are rejected (pass query parameters via `queryParams`). API version prefixes like `/v1.43/` are normalized before scoping.
+
+The only mutating requests allowed are `POST /containers/{id}/{start|stop|restart|kill|pause|unpause|wait|resize|rename|update}` and `DELETE /containers/{id}`, on the stack's own containers. Container create, exec, archive upload, and anything on networks, volumes, images, system, etc. are rejected. In prod, only start/stop/restart are operational; the other allowed mutations need approval.

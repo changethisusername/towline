@@ -49,23 +49,32 @@ export default function AgentDocs() {
 
         <h2 id="how-it-works">How Your MCP Session Works</h2>
         <p>
-          When your user runs <code>towline init my-project</code>, it creates a <code>.claude/settings.json</code> (or
+          When your user runs <code>towline init my-project</code>, it creates a <code>.mcp.json</code> (or
           equivalent for your agent) that tells your MCP client to launch <code>towline-mcp</code> with these flags:
         </p>
-        <pre><code>{`towline-mcp \\
+        <pre><code>{`TOWLINE_PORTAINER_TOKEN=<scoped-api-key> \\
+towline-mcp \\
   -server https://portainer.example.com \\
-  -token <scoped-api-key> \\
-  -stack my-project \\
+  -stack my-project-dev \\
   -tier dev`}</code></pre>
+        <p>
+          The token is passed via the <code>TOWLINE_PORTAINER_TOKEN</code> environment variable (the config&apos;s{" "}
+          <code>env</code> block), not on the command line. Prod-tier configs also pass{" "}
+          <code>-approval-webhook &lt;url&gt;</code>, and <code>-skip-tls-verify</code> is added only when the user
+          said Portainer uses a self-signed certificate.
+        </p>
         <p>
           This MCP server process is your gateway to the Portainer environment. Every tool call you make goes
           through it, and it enforces:
         </p>
         <ul>
           <li><strong>Stack scoping</strong> — You can only see and modify the <code>my-project</code> stack. Other stacks are invisible.</li>
-          <li><strong>Container ownership</strong> — Docker proxy calls are filtered to containers belonging to your stack.</li>
+          <li><strong>Container ownership</strong> — Docker proxy calls are filtered to containers belonging to your stack,
+          and only a small set of container lifecycle mutations is allowed (see <a href="#docker-proxy">Using the Docker Proxy</a>).</li>
+          <li><strong>Compose security policy</strong> — compose files that could reach the host (privileged mode, host bind
+          mounts, host networking, etc.) are rejected in every tier (see <a href="#compose-policy">Compose Security Policy</a>).</li>
           <li><strong>Tier gating</strong> — In <code>dev</code> tier, you have full autonomy. In <code>prod</code> tier,
-          mutations require an approval token.</li>
+          deploys, configuration changes, exec, and destructive operations require approval from a human via an external approval server.</li>
         </ul>
 
         <h2 id="tools-reference">MCP Tools Reference</h2>
@@ -182,12 +191,12 @@ export default function AgentDocs() {
           <tbody>
             <tr><td><code>listLocalStacks</code></td><td>List stacks (filtered to yours)</td></tr>
             <tr><td><code>getLocalStackFile</code></td><td>Get compose file content</td></tr>
-            <tr><td><code>createLocalStack</code></td><td>Deploy a new stack</td></tr>
-            <tr><td><code>updateLocalStack</code></td><td>Update stack (full compose required!)</td></tr>
+            <tr><td><code>createLocalStack</code></td><td>Deploy a new stack (compose security policy applies)</td></tr>
+            <tr><td><code>updateLocalStack</code></td><td>Update stack (full compose required!). Omitting <code>env</code> keeps the current env vars. Recorded in deployment history.</td></tr>
             <tr><td><code>startLocalStack</code></td><td>Start a stopped stack</td></tr>
             <tr><td><code>stopLocalStack</code></td><td>Stop a running stack</td></tr>
-            <tr><td><code>deleteLocalStack</code></td><td>Delete a stack</td></tr>
-            <tr><td><code>dockerProxy</code></td><td>Raw Docker API proxy (GET/POST/PUT/DELETE)</td></tr>
+            <tr><td><code>deleteLocalStack</code></td><td>Delete a stack. You can <code>createLocalStack</code> again afterwards without restarting the MCP server.</td></tr>
+            <tr><td><code>dockerProxy</code></td><td>Raw Docker API proxy: reads plus limited container lifecycle mutations</td></tr>
           </tbody>
         </table>
 
@@ -204,6 +213,23 @@ export default function AgentDocs() {
           <li>Submit the entire modified file to <code>updateLocalStack</code></li>
         </ol>
 
+        <h2 id="compose-policy">Compose Security Policy</h2>
+        <p>
+          In both dev and prod, <code>createLocalStack</code> and <code>updateLocalStack</code> reject compose files that use:
+        </p>
+        <ul>
+          <li><code>privileged</code>, <code>cap_add</code>, <code>devices</code></li>
+          <li><code>network_mode</code> host or <code>container:...</code>, <code>pid</code>, <code>ipc</code>, <code>uts</code>, <code>userns_mode</code>, <code>cgroup</code></li>
+          <li><code>security_opt</code> with <code>unconfined</code> or <code>disable</code></li>
+          <li>Host bind mounts: absolute, relative (<code>./</code>), <code>~</code>, or <code>{"${VAR}"}</code> sources, and long-syntax <code>type: bind</code></li>
+          <li><code>volumes_from</code></li>
+          <li>Volumes with <code>driver_opts</code> or a non-local driver</li>
+          <li><code>secrets</code> / <code>configs</code> with <code>file:</code></li>
+          <li><code>env_file</code> outside the stack directory</li>
+          <li>Top-level <code>include</code> / <code>extends</code></li>
+        </ul>
+        <p>Named volumes and <code>tmpfs</code> are fine. If a compose file is rejected, fix it rather than working around the policy.</p>
+
         <h2 id="tier-system">Tier System &amp; Approval Flow</h2>
         <p>The <code>-tier</code> flag controls what you can do without human approval:</p>
 
@@ -215,25 +241,30 @@ export default function AgentDocs() {
           <thead><tr><th>Operation</th><th>Approval?</th><th>Examples</th></tr></thead>
           <tbody>
             <tr><td>Read</td><td>No</td><td>health, logs, env_get, domains_list, deployments, listLocalStacks</td></tr>
-            <tr><td>Operational</td><td>No</td><td>startLocalStack, scale</td></tr>
+            <tr><td>Operational</td><td>No</td><td>startLocalStack, scale, dockerProxy container start/stop/restart</td></tr>
             <tr><td>Configuration</td><td><strong>Yes</strong></td><td>env_set, domains_add, domains_remove</td></tr>
             <tr><td>Deploy</td><td><strong>Yes</strong></td><td>createLocalStack, updateLocalStack</td></tr>
             <tr><td>Destructive</td><td><strong>Yes</strong></td><td>stopLocalStack, deleteLocalStack</td></tr>
-            <tr><td>Exec / Docker write</td><td><strong>Yes</strong></td><td>towline_exec, dockerProxy non-GET</td></tr>
+            <tr><td>Exec / Docker write</td><td><strong>Yes</strong></td><td>towline_exec, other allowed dockerProxy mutations</td></tr>
           </tbody>
         </table>
 
         <h3>How Approval Works</h3>
+        <p>
+          Approval comes from a <strong>human</strong> via an external approval server configured with{" "}
+          <code>-approval-webhook</code>. You cannot approve your own requests, and a &quot;yes&quot; in the chat does not approve anything.
+        </p>
         <ol>
           <li>You call a tool that requires approval (e.g. <code>updateLocalStack</code> in prod)</li>
-          <li>The response contains an <code>approvalToken</code> string and a message describing the action</li>
-          <li>The human reviews and approves (the token is shown to them)</li>
-          <li>You re-call the same tool with the same arguments plus the <code>approvalToken</code> parameter</li>
-          <li>The call executes</li>
+          <li><code>towline-mcp</code> sends the request to the approval server; the response contains an <code>approvalToken</code> (the request ID). Nothing has run yet.</li>
+          <li>Tell the human what the change does, then wait until they tell you they have approved or rejected it in their approval system</li>
+          <li>Re-call the same tool with identical arguments plus the <code>approvalToken</code> parameter</li>
+          <li>If approved, the call executes. If still pending, nothing runs — wait for the human again; do not re-call in a loop. If rejected, the call is refused — do not retry without discussing it.</li>
         </ol>
         <p>
-          Tokens are single-use, expire after 5 minutes, and are bound to the specific tool and arguments.
-          You cannot reuse a token with different arguments.
+          Tokens are single-use, expire after 30 minutes, and are bound to the specific tool and arguments.
+          You cannot reuse a token with different arguments. If no approval webhook is configured, prod operations
+          that need approval are refused — ask the human to configure one or make the change themselves.
         </p>
 
         <h2 id="common-workflows">Common Agent Workflows</h2>
@@ -277,28 +308,36 @@ export default function AgentDocs() {
         <pre><code>{`towline init my-project --template api --tier dev
 
 Flags:
-  --template  Template pack (api, fullstack, worker, static-site, etc.)
+  --template  Compose template or pack (default, web-app, api, ai-stack, n8n, or a custom pack)
   --tier      Deployment tier (dev or prod, default: dev)`}</code></pre>
+        <p>Project names must match <code>{"^[a-z0-9][a-z0-9_-]{0,62}$"}</code>.</p>
 
         <h3><code>towline list</code></h3>
         <p>List all Towline projects on this machine.</p>
 
         <h3><code>towline destroy &lt;project&gt;</code></h3>
-        <p>Remove a project: deletes Portainer team, API key, stack, and local files.</p>
+        <p>
+          Remove a project: deletes the Portainer stack, service user, and team. Each ID in <code>towline.json</code> is
+          verified against Portainer first and skipped on mismatch. Local files are kept.
+        </p>
 
         <h3><code>towline setup</code></h3>
-        <p>Interactive setup: connects to a Portainer instance and saves credentials.</p>
+        <p>
+          Interactive setup: connects to a Portainer instance (verifying its TLS certificate unless the user says it is
+          self-signed), asks for an optional approval webhook URL for prod tier, and saves credentials.
+        </p>
 
         <h2 id="project-structure">Generated Project Structure</h2>
         <pre><code>{`~/projects/<name>/
-├── .claude/settings.json   # MCP server configuration
+├── .mcp.json               # MCP server configuration (0600, gitignored)
+├── .claude/settings.json   # Claude Code permissions
 ├── CLAUDE.md               # Agent instructions for this project
 ├── docker-compose.yml      # From template
 ├── .env.example            # Env var template
 ├── skills/                 # Agent skills library
 └── .git/`}</code></pre>
         <p>
-          The <code>.claude/settings.json</code> file tells your MCP client how to launch <code>towline-mcp</code>.
+          The <code>.mcp.json</code> file tells your MCP client how to launch <code>towline-mcp</code>.
           The <code>CLAUDE.md</code> file contains project-specific instructions including available tools,
           the stack name, and operational guidelines.
         </p>
@@ -308,8 +347,18 @@ Flags:
           The <code>dockerProxy</code> tool gives you raw Docker API access, scoped to your stack&apos;s containers.
           Use it for operations not covered by the Towline tools.
         </p>
+        <ul>
+          <li><code>dockerAPIPath</code> must be a plain path: query strings, fragments, <code>%</code>-encoding, backslashes,
+          and <code>.</code>/<code>..</code> or empty segments are rejected. Pass query parameters via <code>queryParams</code>.
+          API version prefixes like <code>/v1.43/</code> are normalized before scoping.</li>
+          <li>The only mutating requests allowed are{" "}
+          <code>{"POST /containers/{id}/{start|stop|restart|kill|pause|unpause|wait|resize|rename|update}"}</code> and{" "}
+          <code>{"DELETE /containers/{id}"}</code>, on your stack&apos;s own containers.</li>
+          <li>Container create, exec, archive upload, and anything on networks, volumes, images, system, etc. are rejected.
+          Use <code>updateLocalStack</code> and <code>towline_exec</code> instead.</li>
+        </ul>
         <pre><code>{`// List containers
-dockerProxy method=GET dockerAPIPath=/containers/json
+dockerProxy method=GET dockerAPIPath=/containers/json queryParams=[{key: "all", value: "true"}]
 
 // Inspect a container
 dockerProxy method=GET dockerAPIPath=/containers/<id>/json
@@ -317,13 +366,16 @@ dockerProxy method=GET dockerAPIPath=/containers/<id>/json
 // Restart a container (no approval in prod — operational)
 dockerProxy method=POST dockerAPIPath=/containers/<id>/restart
 
-// Non-GET requests to non-operational paths require approval in prod`}</code></pre>
+// Other allowed mutations (kill, pause, rename, update, DELETE, ...) require approval in prod`}</code></pre>
 
         <h2 id="environment-variables">Internal Environment Variables</h2>
         <p>
           Variables prefixed with <code>_TOWLINE_</code> are managed internally by Towline (e.g. deployment history).
           You cannot set or override them — they are silently filtered from <code>createLocalStack</code> and{" "}
-          <code>updateLocalStack</code> requests.
+          <code>updateLocalStack</code> requests, and the stack&apos;s own internal variables and deployment history are
+          preserved on update. Omitting <code>env</code> from <code>updateLocalStack</code> keeps the stack&apos;s current
+          variables. Every <code>updateLocalStack</code> and <code>towline_env_set</code> is recorded in{" "}
+          <code>towline_deployments</code> (env changes record the variable name only, never the value).
         </p>
 
         <h2 id="prerequisites">Prerequisites</h2>
