@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/changethisusername/towline/internal/approval"
@@ -20,6 +21,12 @@ import (
 const (
 	defaultToolsPath        = "tools.yaml"
 	defaultTowlineToolsPath = "towline-tools.yaml"
+
+	// tokenEnvVar supplies the Portainer API token without exposing it in
+	// the process argument list (visible to every local user via ps).
+	tokenEnvVar = "TOWLINE_PORTAINER_TOKEN"
+	// approvalAuthEnvVar supplies an optional bearer token for the approval webhook.
+	approvalAuthEnvVar = "TOWLINE_APPROVAL_WEBHOOK_TOKEN"
 )
 
 var (
@@ -37,7 +44,7 @@ func main() {
 
 	// Upstream flags
 	serverFlag := flag.String("server", "", "The Portainer server URL")
-	tokenFlag := flag.String("token", "", "The authentication token for the Portainer server")
+	tokenFlag := flag.String("token", "", "The authentication token for the Portainer server (prefer the "+tokenEnvVar+" environment variable)")
 	toolsFlag := flag.String("tools", "", "The path to the tools YAML file")
 	readOnlyFlag := flag.Bool("read-only", false, "Run in read-only mode")
 	disableVersionCheckFlag := flag.Bool("disable-version-check", true, "Disable Portainer server version check")
@@ -48,11 +55,16 @@ func main() {
 	proxyFlag := flag.String("proxy", "", "Proxy backend: traefik, caddy, or cloudflare (auto-detected if omitted)")
 	caddyAPIFlag := flag.String("caddy-api", "http://localhost:2019", "Caddy admin API URL")
 	skipTLSVerifyFlag := flag.Bool("skip-tls-verify", false, "Skip TLS certificate verification (for self-signed certs)")
+	approvalWebhookFlag := flag.String("approval-webhook", "", "Approval server URL; required for prod-tier operations that need human approval")
 
 	flag.Parse()
 
-	if *serverFlag == "" || *tokenFlag == "" {
-		log.Fatal().Msg("Both -server and -token flags are required")
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv(tokenEnvVar)
+	}
+	if *serverFlag == "" || token == "" {
+		log.Fatal().Msg("-server and a token (" + tokenEnvVar + " or -token) are required")
 	}
 	if *stackFlag == "" || *tierFlag == "" {
 		log.Fatal().Msg("Both -stack and -tier flags are required")
@@ -92,7 +104,7 @@ func main() {
 
 	// Create the upstream server
 	srv, err := mcp.NewPortainerMCPServer(
-		*serverFlag, *tokenFlag, toolsPath,
+		*serverFlag, token, toolsPath,
 		mcp.WithReadOnly(*readOnlyFlag),
 		mcp.WithDisableVersionCheck(*disableVersionCheckFlag),
 		mcp.WithSkipTLSVerify(*skipTLSVerifyFlag),
@@ -110,6 +122,16 @@ func main() {
 
 	// Create middleware instances
 	approvalStore := approval.NewStore()
+	gate := &middleware.ApprovalGate{Store: approvalStore, Project: *stackFlag}
+	if *approvalWebhookFlag != "" {
+		webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
+		if err != nil {
+			log.Fatal().Err(err).Msg("invalid -approval-webhook")
+		}
+		gate.Approver = webhook
+	} else if tier == middleware.TierProd {
+		log.Warn().Msg("no -approval-webhook configured: prod operations that need approval will be refused")
+	}
 	stackScoping := middleware.NewStackScoping(*stackFlag)
 
 	// Resolve stack ID at startup
@@ -129,18 +151,26 @@ func main() {
 	envID := getEnvironmentID(srv, *stackFlag)
 	ownership := middleware.NewContainerOwnership(*stackFlag, envID, proxyFn)
 
+	// Create towline handlers
+	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
+
 	// Build middleware chain for a given tool
 	wrappers := func(toolName string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		var mws []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc
 
-		// Outermost: tier gating
-		mws = append(mws, middleware.NewTierGating(tier, approvalStore, toolName))
+		// Outermost: compose security policy, so a stack that would be
+		// rejected anyway never reaches the approval flow
+		mws = append(mws, middleware.NewComposePolicy(toolName))
+
+		// Tier gating
+		mws = append(mws, middleware.NewTierGating(tier, gate, toolName))
 
 		// Stack scoping
 		mws = append(mws, stackScoping.ForTool(toolName))
 
-		// Env filter: strip _TOWLINE_ prefixed env vars from create/update requests
-		mws = append(mws, middleware.NewEnvFilter(toolName))
+		// Env filter: strip agent-supplied _TOWLINE_ env vars from create/update
+		// requests, and carry the stack's own internal vars over on update
+		mws = append(mws, middleware.NewEnvFilter(toolName, handlers.PrepareStackUpdate))
 
 		// Container ownership (only for dockerProxy)
 		if toolName == "dockerProxy" {
@@ -153,9 +183,6 @@ func main() {
 	// Register upstream features with middleware wrapping
 	// We use AddToolWrapped instead of the upstream Add*Features methods
 	registerWrappedUpstreamTools(srv, wrappers)
-
-	// Create towline handlers
-	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
 
 	// Setup proxy manager (auto-detect or use flag)
 	setupProxyManager(handlers, srv, *stackFlag, *proxyFlag, *caddyAPIFlag)
@@ -237,7 +264,7 @@ func setupProxyManager(h *towline.Handlers, srv *mcp.PortainerMCPServer, stackNa
 			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
 			log.Info().Str("proxy", "traefik").Msg("proxy backend configured via flag")
 		case proxy.BackendCaddy:
-			cm := proxy.NewCaddyManager(caddyAPI)
+			cm := proxy.NewCaddyManager(caddyAPI, stackName)
 			h.ProxyManager = cm
 			h.CaddyManager = cm
 			log.Info().Str("proxy", "caddy").Str("api", caddyAPI).Msg("proxy backend configured via flag")

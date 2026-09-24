@@ -48,7 +48,7 @@ func TestRegression_ApprovalTokenExpiry(t *testing.T) {
 	require.NotEmpty(t, token)
 
 	// Manually expire the token by manipulating via validate timing.
-	// The TokenTTL is 5 minutes, so we cannot wait. Instead, we verify the store
+	// The TokenTTL is 30 minutes, so we cannot wait. Instead, we verify the store
 	// handles expiry correctly by validating once (which removes it) and trying again.
 
 	// First validate: should succeed
@@ -115,8 +115,7 @@ func TestRegression_CreateStackResolvesID(t *testing.T) {
 	require.NoError(t, err)
 	srv.MergeTools(towlineTools)
 
-	approvalStore := approval.NewStore()
-	defer approvalStore.Stop()
+	gate, _ := newTestGate(t)
 
 	// Create scoping for a stack that doesn't exist yet (no SetStackID)
 	scoping := middleware.NewStackScoping("newapp")
@@ -133,7 +132,7 @@ func TestRegression_CreateStackResolvesID(t *testing.T) {
 	// Create the stack
 	createHandler := middleware.Chain(
 		srv.HandleCreateLocalStack(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "createLocalStack")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "createLocalStack")...,
 	)
 
 	req := mcpgo.CallToolRequest{
@@ -158,7 +157,7 @@ func TestRegression_CreateStackResolvesID(t *testing.T) {
 	// Now try updateLocalStack with the resolved ID
 	updateHandler := middleware.Chain(
 		srv.HandleUpdateLocalStack(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "updateLocalStack")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "updateLocalStack")...,
 	)
 
 	req = mcpgo.CallToolRequest{
@@ -226,7 +225,7 @@ func TestRegression_DockerProxyPOSTExecBlockedInProd(t *testing.T) {
 		"dockerAPIPath": "/containers/owned-container-abc123/rename",
 	})
 	text := resultText(t, result)
-	assert.Contains(t, text, "Production operation requires approval")
+	assert.Contains(t, text, "requires human approval")
 }
 
 // TestRegression_EmptyStackPendingMode verifies that when a stack doesn't exist yet,
@@ -248,8 +247,7 @@ func TestRegression_EmptyStackPendingMode(t *testing.T) {
 	require.NoError(t, err)
 	srv.MergeTools(towlineTools)
 
-	approvalStore := approval.NewStore()
-	defer approvalStore.Stop()
+	gate, _ := newTestGate(t)
 
 	// Stack not resolved (pending mode)
 	scoping := middleware.NewStackScoping("pending-app")
@@ -262,7 +260,7 @@ func TestRegression_EmptyStackPendingMode(t *testing.T) {
 	// Attempt to update (should fail - stack not resolved)
 	updateHandler := middleware.Chain(
 		srv.HandleUpdateLocalStack(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "updateLocalStack")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "updateLocalStack")...,
 	)
 
 	req := mcpgo.CallToolRequest{
@@ -283,7 +281,7 @@ func TestRegression_EmptyStackPendingMode(t *testing.T) {
 	// Attempt to create (should succeed)
 	createHandler := middleware.Chain(
 		srv.HandleCreateLocalStack(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "createLocalStack")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "createLocalStack")...,
 	)
 
 	req = mcpgo.CallToolRequest{
@@ -318,7 +316,7 @@ func TestRegression_MiddlewareChainOrder(t *testing.T) {
 
 	text := resultText(t, result)
 	// Should get approval request first (tier gating), NOT stack scoping error
-	assert.Contains(t, text, "Production operation requires approval",
+	assert.Contains(t, text, "requires human approval",
 		"tier gating should run before stack scoping; got: %s", text)
 	assert.NotContains(t, text, "does not match scoped stack",
 		"stack scoping error should not leak before tier approval")
@@ -494,8 +492,7 @@ func TestRegression_CreateStackWrongName(t *testing.T) {
 	require.NoError(t, err)
 	srv.MergeTools(towlineTools)
 
-	approvalStore := approval.NewStore()
-	defer approvalStore.Stop()
+	gate, _ := newTestGate(t)
 
 	scoping := middleware.NewStackScoping("myapp")
 
@@ -506,7 +503,7 @@ func TestRegression_CreateStackWrongName(t *testing.T) {
 
 	createHandler := middleware.Chain(
 		srv.HandleCreateLocalStack(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "createLocalStack")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "createLocalStack")...,
 	)
 
 	req := mcpgo.CallToolRequest{
@@ -549,8 +546,7 @@ func TestRegression_ListStacksEmptyResult(t *testing.T) {
 	require.NoError(t, err)
 	srv.MergeTools(towlineTools)
 
-	approvalStore := approval.NewStore()
-	defer approvalStore.Stop()
+	gate, _ := newTestGate(t)
 
 	scoping := middleware.NewStackScoping("testapp-dev")
 	scoping.SetStackID(1)
@@ -562,7 +558,7 @@ func TestRegression_ListStacksEmptyResult(t *testing.T) {
 
 	handler := middleware.Chain(
 		srv.HandleGetLocalStacks(),
-		buildMiddlewareChain(middleware.TierDev, approvalStore, scoping, ownership, "listLocalStacks")...,
+		buildMiddlewareChain(middleware.TierDev, gate, scoping, ownership, nil, "listLocalStacks")...,
 	)
 
 	req := mcpgo.CallToolRequest{

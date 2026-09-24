@@ -5,6 +5,9 @@
 # Environment variables:
 #   TOWLINE_VERSION     — version to install (default: latest)
 #   TOWLINE_INSTALL_DIR — install directory (default: /usr/local/bin or ~/.local/bin)
+#
+# Every downloaded archive is verified against the release's checksums.txt
+# before it is extracted; the install aborts if verification is not possible.
 
 set -eu
 
@@ -22,6 +25,11 @@ main() {
     done
 
     verify_checksums
+
+    for bin in $BINARIES; do
+        extract_binary "$bin"
+    done
+
     install_binaries
     cleanup
 
@@ -110,41 +118,61 @@ create_tempdir() {
     trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
 }
 
+archive_name() {
+    echo "${1}_${VERSION}_${OS}_${ARCH}.tar.gz"
+}
+
 download_binary() {
     bin="$1"
-    archive="${bin}_${VERSION}_${OS}_${ARCH}.tar.gz"
+    archive="$(archive_name "$bin")"
     url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${archive}"
 
     info "Downloading ${archive}..."
     download_file "$url" "${TMPDIR_INSTALL}/${archive}"
+}
+
+extract_binary() {
+    bin="$1"
+    archive="$(archive_name "$bin")"
 
     info "Extracting ${bin}..."
     tar -xzf "${TMPDIR_INSTALL}/${archive}" -C "${TMPDIR_INSTALL}" "$bin" 2>/dev/null || \
         tar -xzf "${TMPDIR_INSTALL}/${archive}" -C "${TMPDIR_INSTALL}"
 }
 
+sha256_of() {
+    if command_exists sha256sum; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    elif command_exists shasum; then
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    else
+        error "Neither sha256sum nor shasum is available; cannot verify the download."
+    fi
+}
+
 verify_checksums() {
     checksums_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/checksums.txt"
     checksums_file="${TMPDIR_INSTALL}/checksums.txt"
 
-    if download_file "$checksums_url" "$checksums_file" 2>/dev/null; then
-        info "Verifying checksums..."
-        cd "$TMPDIR_INSTALL"
+    download_file "$checksums_url" "$checksums_file" 2>/dev/null || \
+        error "Could not download checksums.txt for ${VERSION}; refusing to install unverified binaries."
 
-        if command_exists sha256sum; then
-            sha256sum -c checksums.txt --ignore-missing 2>/dev/null || \
-                warn "Checksum verification failed — continuing anyway"
-        elif command_exists shasum; then
-            shasum -a 256 -c checksums.txt --ignore-missing 2>/dev/null || \
-                warn "Checksum verification failed — continuing anyway"
-        else
-            warn "No sha256sum or shasum available — skipping checksum verification"
-        fi
-
-        cd - > /dev/null
-    else
-        warn "No checksums.txt found — skipping verification"
+    if ! command_exists sha256sum && ! command_exists shasum; then
+        error "Neither sha256sum nor shasum is available; cannot verify the download."
     fi
+
+    info "Verifying checksums..."
+    for bin in $BINARIES; do
+        archive="$(archive_name "$bin")"
+        expected="$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$checksums_file")"
+        if [ -z "$expected" ]; then
+            error "No checksum listed for ${archive}; refusing to install."
+        fi
+        actual="$(sha256_of "${TMPDIR_INSTALL}/${archive}")"
+        if [ "$expected" != "$actual" ]; then
+            error "Checksum mismatch for ${archive} (expected ${expected}, got ${actual}); refusing to install."
+        fi
+    done
 }
 
 install_binaries() {

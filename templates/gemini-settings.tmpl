@@ -1,14 +1,18 @@
 {
   "mcpServers": {
     "towline-{{.Tier}}": {
-      "command": "{{.MCPBinaryPath}}",
+      "command": {{json .MCPBinaryPath}},
       "args": [
-        "-server", "{{.PortainerURL}}",
-        "-token", "{{.APIToken}}",
-        "-stack", "{{.StackName}}",
-        "-tier", "{{.Tier}}",
-        "-disable-version-check"
-      ]
+        "-server", {{json .PortainerURL}},
+        "-stack", {{json .StackName}},
+        "-tier", {{json .Tier}},
+        "-disable-version-check"{{if .SkipTLSVerify}},
+        "-skip-tls-verify"{{end}}{{if and (eq .Tier "prod") .ApprovalWebhook}},
+        "-approval-webhook", {{json .ApprovalWebhook}}{{end}}
+      ],
+      "env": {
+        "TOWLINE_PORTAINER_TOKEN": {{json .APIToken}}
+      }
     }
   }
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/changethisusername/towline/internal/approval"
@@ -20,18 +21,25 @@ import (
 // matching the production setup in cmd/towline-mcp/main.go.
 func buildMiddlewareChain(
 	tier middleware.Tier,
-	approvalStore *approval.Store,
+	gate *middleware.ApprovalGate,
 	scoping *middleware.StackScoping,
 	ownership *middleware.ContainerOwnership,
+	prepare middleware.StackUpdatePreparer,
 	toolName string,
 ) []middleware.MiddlewareFunc {
 	var mws []middleware.MiddlewareFunc
 
-	// Outermost: tier gating (runs first)
-	mws = append(mws, middleware.NewTierGating(tier, approvalStore, toolName))
+	// Outermost: compose security policy
+	mws = append(mws, middleware.NewComposePolicy(toolName))
+
+	// Tier gating
+	mws = append(mws, middleware.NewTierGating(tier, gate, toolName))
 
 	// Stack scoping
 	mws = append(mws, scoping.ForTool(toolName))
+
+	// Env filter
+	mws = append(mws, middleware.NewEnvFilter(toolName, prepare))
 
 	// Container ownership (only for dockerProxy)
 	if toolName == "dockerProxy" {
@@ -45,12 +53,13 @@ func buildMiddlewareChain(
 func wrapHandler(
 	handler func(context.Context, mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error),
 	tier middleware.Tier,
-	approvalStore *approval.Store,
+	gate *middleware.ApprovalGate,
 	scoping *middleware.StackScoping,
 	ownership *middleware.ContainerOwnership,
+	prepare middleware.StackUpdatePreparer,
 	toolName string,
 ) func(context.Context, mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	mws := buildMiddlewareChain(tier, approvalStore, scoping, ownership, toolName)
+	mws := buildMiddlewareChain(tier, gate, scoping, ownership, prepare, toolName)
 	return middleware.Chain(handler, mws...)
 }
 
@@ -72,8 +81,7 @@ func newTestEnv(t *testing.T, tier middleware.Tier, mock *mockPortainerClient) *
 	require.NoError(t, err)
 	srv.MergeTools(towlineTools)
 
-	approvalStore := approval.NewStore()
-	t.Cleanup(func() { approvalStore.Stop() })
+	gate, approver := newTestGate(t)
 
 	scoping := middleware.NewStackScoping("testapp-dev")
 	scoping.SetStackID(1)
@@ -87,29 +95,31 @@ func newTestEnv(t *testing.T, tier middleware.Tier, mock *mockPortainerClient) *
 	handlers := towline.NewHandlers(srv, "testapp-dev", 1, proxyFn)
 
 	return &testEnv{
-		srv:           srv,
-		approvalStore: approvalStore,
-		scoping:       scoping,
-		ownership:     ownership,
-		handlers:      handlers,
-		mock:          mock,
-		tier:          tier,
+		srv:       srv,
+		gate:      gate,
+		approver:  approver,
+		scoping:   scoping,
+		ownership: ownership,
+		handlers:  handlers,
+		mock:      mock,
+		tier:      tier,
 	}
 }
 
 type testEnv struct {
-	srv           *mcp.PortainerMCPServer
-	approvalStore *approval.Store
-	scoping       *middleware.StackScoping
-	ownership     *middleware.ContainerOwnership
-	handlers      *towline.Handlers
-	mock          *mockPortainerClient
-	tier          middleware.Tier
+	srv       *mcp.PortainerMCPServer
+	gate      *middleware.ApprovalGate
+	approver  *testApprover
+	scoping   *middleware.StackScoping
+	ownership *middleware.ContainerOwnership
+	handlers  *towline.Handlers
+	mock      *mockPortainerClient
+	tier      middleware.Tier
 }
 
 // wrap applies the full middleware chain to a handler for a specific tool name.
 func (e *testEnv) wrap(toolName string, handler func(context.Context, mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error)) func(context.Context, mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	return wrapHandler(handler, e.tier, e.approvalStore, e.scoping, e.ownership, toolName)
+	return wrapHandler(handler, e.tier, e.gate, e.scoping, e.ownership, e.handlers.PrepareStackUpdate, toolName)
 }
 
 // call invokes a wrapped handler with the given arguments.
@@ -170,7 +180,7 @@ func TestE2E_ProdTier_RequiresApproval(t *testing.T) {
 	})
 
 	text := resultText(t, result)
-	assert.Contains(t, text, "Production operation requires approval")
+	assert.Contains(t, text, "requires human approval")
 	assert.Contains(t, text, "approvalToken")
 	assert.False(t, mock.updateLocalStackCalled, "handler should not have been called yet")
 
@@ -312,7 +322,7 @@ func TestE2E_TowlineEnvSet_ProdApproval(t *testing.T) {
 		"value": "8080",
 	})
 	text := resultText(t, result)
-	assert.Contains(t, text, "Production operation requires approval")
+	assert.Contains(t, text, "requires human approval")
 
 	token := extractApprovalToken(t, text)
 
@@ -376,4 +386,82 @@ func extractApprovalToken(t *testing.T, text string) string {
 	token := text[start : start+end]
 	require.NotEmpty(t, token)
 	return token
+}
+
+// testApprover is an in-memory approval server. Tests set status to simulate
+// the human's decision; it defaults to approved.
+type testApprover struct {
+	mu        sync.Mutex
+	status    approval.Status
+	submitted []approval.Request
+}
+
+func (a *testApprover) Submit(ctx context.Context, req approval.Request) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.submitted = append(a.submitted, req)
+	return nil
+}
+
+func (a *testApprover) Status(ctx context.Context, id string) (approval.Status, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.status, nil
+}
+
+func (a *testApprover) set(status approval.Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status = status
+}
+
+func newTestGate(t *testing.T) (*middleware.ApprovalGate, *testApprover) {
+	t.Helper()
+	store := approval.NewStore()
+	t.Cleanup(store.Stop)
+	approver := &testApprover{status: approval.StatusApproved}
+	return &middleware.ApprovalGate{Store: store, Approver: approver, Project: "testapp-dev"}, approver
+}
+
+// TestE2E_ProdTier_PendingApprovalBlocks verifies the agent cannot proceed by
+// re-calling with the token before a human approves.
+func TestE2E_ProdTier_PendingApprovalBlocks(t *testing.T) {
+	mock := newMockClient()
+	env := newTestEnv(t, middleware.TierProd, mock)
+	env.approver.set(approval.StatusPending)
+
+	handler := env.srv.HandleUpdateLocalStack()
+	args := map[string]any{
+		"id":            float64(1),
+		"environmentId": float64(1),
+		"file":          "version: '3'\nservices:\n  web:\n    image: nginx\n",
+	}
+	token := extractApprovalToken(t, resultText(t, env.call(t, "updateLocalStack", handler, args)))
+	require.Len(t, env.approver.submitted, 1)
+	assert.Contains(t, env.approver.submitted[0].StackContent, "nginx")
+
+	args["approvalToken"] = token
+	text := resultText(t, env.call(t, "updateLocalStack", handler, args))
+	assert.Contains(t, text, "still pending")
+	assert.False(t, mock.updateLocalStackCalled)
+
+	env.approver.set(approval.StatusApproved)
+	text = resultText(t, env.call(t, "updateLocalStack", handler, args))
+	assert.Contains(t, text, "updated successfully")
+}
+
+// TestE2E_ComposePolicyRejectsHostEscape verifies a privileged or host-mounting
+// compose file never reaches Portainer, even in dev tier.
+func TestE2E_ComposePolicyRejectsHostEscape(t *testing.T) {
+	mock := newMockClient()
+	env := newTestEnv(t, middleware.TierDev, mock)
+
+	result := env.call(t, "updateLocalStack", env.srv.HandleUpdateLocalStack(), map[string]any{
+		"id":            float64(1),
+		"environmentId": float64(1),
+		"file":          "services:\n  pwn:\n    image: alpine\n    privileged: true\n    volumes: [\"/:/host\"]\n",
+	})
+	assert.True(t, result.IsError)
+	assert.Contains(t, resultText(t, result), "security policy")
+	assert.False(t, mock.updateLocalStackCalled)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -15,13 +14,15 @@ import (
 
 var containerPathRegex = regexp.MustCompile(`^/containers/([^/]+)(?:/|$)`)
 
+// extractContainerID returns the container identifier from a normalized
+// /containers/{id}[/...] path, or "" for collection endpoints.
 func extractContainerID(path string) string {
 	matches := containerPathRegex.FindStringSubmatch(path)
 	if len(matches) < 2 {
 		return ""
 	}
 	id := matches[1]
-	if id == "json" || id == "create" {
+	if reservedContainerIDs[id] {
 		return ""
 	}
 	return id
@@ -40,63 +41,43 @@ func NewContainerOwnership(stackName string, envID int, proxyFn func(opts models
 	return &ContainerOwnership{stackName: stackName, envID: envID, proxyFn: proxyFn}
 }
 
-// blockedDockerPaths lists Docker API path prefixes that are blocked for non-GET
-// requests. These endpoints can affect resources outside the scoped stack.
-var blockedDockerPaths = []string{
-	"/networks/",
-	"/volumes/",
-	"/swarm/",
-	"/secrets/",
-	"/configs/",
-	"/plugins/",
-	"/services/",
-	"/nodes/",
-	"/images/create",    // image pull
-	"/images/build",     // image build
-	"/images/push",      // image push
-	"/build",            // build
-	"/system/",          // system prune, info mutations
-	"/containers/prune", // host-wide container prune
-}
-
-// isBlockedPath returns true if the path is a mutating request to a blocked Docker API endpoint.
-func isBlockedPath(path, method string) bool {
-	if method == "GET" || method == "HEAD" {
-		return false
-	}
-	for _, prefix := range blockedDockerPaths {
-		if strings.HasPrefix(path, prefix) {
-			return true
-		}
-	}
-	// Block /exec/{id}/start — can target any exec instance, bypassing container ownership
-	if strings.HasPrefix(path, "/exec/") && method != "GET" {
-		return true
-	}
-	// Block DELETE on images — host-wide impact
-	if strings.HasPrefix(path, "/images/") && method == "DELETE" {
-		return true
-	}
-	return false
-}
-
 // ForDockerProxy returns a middleware function that enforces container ownership
 // for Docker proxy tool calls.
 func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			parser := toolgen.NewParameterParser(request)
-			path, _ := parser.GetString("dockerAPIPath", false)
+			rawPath, _ := parser.GetString("dockerAPIPath", false)
 			method, _ := parser.GetString("method", false)
 
-			// Block mutating calls to non-container endpoints
-			if isBlockedPath(path, method) {
-				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q is not allowed for method %s in scoped mode", path, method)), nil
+			// Ownership is checked in this stack's environment, so the request
+			// must go to that same environment; otherwise a container name the
+			// stack owns here could address another project's container there.
+			if o.envID > 0 {
+				envID, err := parser.GetInt("environmentId", true)
+				if err != nil {
+					return mcp.NewToolResultErrorFromErr("invalid environmentId parameter", err), nil
+				}
+				if envID != o.envID {
+					return mcp.NewToolResultError(fmt.Sprintf("environment %d is outside this stack's scope (environment %d)", envID, o.envID)), nil
+				}
+			}
+
+			path, err := NormalizeDockerPath(rawPath)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q rejected: %v", rawPath, err)), nil
+			}
+
+			// Mutations are limited to lifecycle actions on the stack's own
+			// containers; everything else (container create, exec, networks,
+			// volumes, images, system, ...) can reach outside the stack.
+			if !isReadMethod(method) && !isAllowedMutation(path, method) {
+				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q is not allowed for method %s in scoped mode", rawPath, method)), nil
 			}
 
 			containerID := extractContainerID(path)
 			if containerID == "" {
-				if strings.HasPrefix(path, "/containers/json") {
+				if path == "/containers/json" {
 					return o.filterContainerList(ctx, request, next)
 				}
 				return next(ctx, request)

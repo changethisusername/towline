@@ -24,12 +24,33 @@ type TemplateData struct {
 	MCPBinaryPath string
 	TeamID        int
 	UserID        int
+	// SkipTLSVerify adds -skip-tls-verify to MCP configs (self-signed certs).
+	SkipTLSVerify bool
+	// ApprovalWebhook is passed to prod-tier MCP servers as -approval-webhook.
+	ApprovalWebhook string
 }
 
-// renderTemplate renders a named template to outputPath with the given data.
-// It checks ~/.towline/templates/ first for user overrides, then falls back
-// to embedded templates.
-func renderTemplate(name string, data TemplateData, outputPath string) error {
+// Permissions for generated files. Agent configs contain the project's
+// Portainer API token and must not be readable by other local users.
+const (
+	publicFileMode os.FileMode = 0644
+	secretFileMode os.FileMode = 0600
+	secretDirMode  os.FileMode = 0700
+)
+
+// templateFuncs are available to all templates. json renders a value as a
+// JSON literal, so config templates stay valid whatever the value contains.
+var templateFuncs = template.FuncMap{
+	"json": func(v any) (string, error) {
+		b, err := json.Marshal(v)
+		return string(b), err
+	},
+}
+
+// renderTemplate renders a named template to outputPath with the given data
+// and file permissions. It checks ~/.towline/templates/ first for user
+// overrides, then falls back to embedded templates.
+func renderTemplate(name string, data TemplateData, outputPath string, perm os.FileMode) error {
 	home, _ := os.UserHomeDir()
 	userPath := filepath.Join(home, ".towline", "templates", name)
 
@@ -45,22 +66,34 @@ func renderTemplate(name string, data TemplateData, outputPath string) error {
 		return fmt.Errorf("template '%s' not found: %w", name, err)
 	}
 
-	tmpl, err := template.New(name).Parse(string(tmplContent))
+	tmpl, err := template.New(name).Funcs(templateFuncs).Parse(string(tmplContent))
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-		return err
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	f, err := os.Create(outputPath)
-	if err != nil {
+	return writeFileMode(outputPath, []byte(buf.String()), perm)
+}
+
+// writeFileMode writes a file with exactly the given permissions (also when
+// it already exists), creating parent directories as needed. Secret files get
+// a private parent directory.
+func writeFileMode(path string, data []byte, perm os.FileMode) error {
+	dirMode := os.FileMode(0755)
+	if perm == secretFileMode {
+		dirMode = secretDirMode
+	}
+	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
 		return err
 	}
-	defer f.Close()
-
-	return tmpl.Execute(f, data)
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return err
+	}
+	return os.Chmod(path, perm)
 }
 
 // renderTemplateToString renders a template to a string instead of a file.
@@ -80,7 +113,7 @@ func renderTemplateToString(name string, data TemplateData) (string, error) {
 		return "", fmt.Errorf("template '%s' not found: %w", name, err)
 	}
 
-	tmpl, err := template.New(name).Parse(string(tmplContent))
+	tmpl, err := template.New(name).Funcs(templateFuncs).Parse(string(tmplContent))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse template: %w", err)
 	}
@@ -208,10 +241,10 @@ func readPackComposeContent(pack *TemplatePack, packDir string) (string, error) 
 }
 
 // mergePackMCPs merges additional MCP server configurations from a template pack
-// into the agent settings files (.claude/settings.json, .cursor/mcp.json, .gemini/settings.json).
+// into the agent MCP config files (.mcp.json, .cursor/mcp.json, .gemini/settings.json).
 func mergePackMCPs(mcps map[string]PackMCPConfig, projectDir string) {
 	configFiles := []string{
-		filepath.Join(projectDir, ".claude", "settings.json"),
+		filepath.Join(projectDir, ".mcp.json"),
 		filepath.Join(projectDir, ".cursor", "mcp.json"),
 		filepath.Join(projectDir, ".gemini", "settings.json"),
 	}
@@ -250,8 +283,8 @@ func mergePackMCPs(mcps map[string]PackMCPConfig, projectDir string) {
 			continue
 		}
 
-		// Preserve original permissions
-		os.WriteFile(cfgPath, out, 0644)
+		// These files hold the project API token
+		_ = writeFileMode(cfgPath, out, secretFileMode)
 	}
 }
 

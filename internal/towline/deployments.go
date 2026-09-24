@@ -224,3 +224,94 @@ func computeSimpleDiff(old, new string) string {
 
 	return diff.String()
 }
+
+// findStack returns the scoped stack.
+func (h *Handlers) findStack() (*models.LocalStack, error) {
+	stacks, err := h.Server.Client().GetLocalStacks()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stacks: %w", err)
+	}
+	for i := range stacks {
+		if stacks[i].Name == h.StackName {
+			return &stacks[i], nil
+		}
+	}
+	return nil, fmt.Errorf("stack %q not found", h.StackName)
+}
+
+// appendDeploymentEntry returns a copy of env with a new entry appended to
+// the deployment history stored in _TOWLINE_DEPLOYMENTS. This lets callers
+// record history in the same stack update that performs the change, instead
+// of redeploying a second time just to write the history.
+func appendDeploymentEntry(env []models.LocalStackEnvVar, description, previousCompose, newCompose, outcome string) ([]models.LocalStackEnvVar, error) {
+	out := make([]models.LocalStackEnvVar, len(env))
+	copy(out, env)
+
+	var entries []DeploymentEntry
+	idx := -1
+	for i := range out {
+		if out[i].Name == deploymentsEnvVar {
+			idx = i
+			// A corrupt history is replaced rather than blocking the deploy.
+			_ = json.Unmarshal([]byte(out[i].Value), &entries)
+			break
+		}
+	}
+
+	nextID := 1
+	if len(entries) > 0 {
+		nextID = entries[len(entries)-1].ID + 1
+	}
+	entries = append(entries, DeploymentEntry{
+		ID:          nextID,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Description: description,
+		Diff:        computeSimpleDiff(previousCompose, newCompose),
+		Outcome:     outcome,
+	})
+	if len(entries) > maxDeployments {
+		entries = entries[len(entries)-maxDeployments:]
+	}
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deployments: %w", err)
+	}
+	if idx >= 0 {
+		out[idx].Value = string(data)
+	} else {
+		out = append(out, models.LocalStackEnvVar{Name: deploymentsEnvVar, Value: string(data)})
+	}
+	return out, nil
+}
+
+// PrepareStackUpdate is used by the env filter middleware when the agent
+// calls updateLocalStack. It returns the stack's current user-visible env
+// (used when the agent omits env, so an update does not wipe it) and the
+// internal _TOWLINE_* env with a deployment history entry for this update
+// appended (so an update neither erases nor skips the history).
+func (h *Handlers) PrepareStackUpdate(newCompose string) (userEnv, internalEnv []models.LocalStackEnvVar, err error) {
+	stack, err := h.findStack()
+	if err != nil {
+		return nil, nil, err
+	}
+	previous, err := h.Server.Client().GetLocalStackFile(stack.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get stack compose file: %w", err)
+	}
+
+	env, err := appendDeploymentEntry(stack.Env, "Stack updated via updateLocalStack", previous, newCompose, "deployed")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	userEnv = []models.LocalStackEnvVar{}
+	for _, e := range env {
+		if strings.HasPrefix(e.Name, "_TOWLINE_") {
+			internalEnv = append(internalEnv, e)
+		} else {
+			userEnv = append(userEnv, e)
+		}
+	}
+	return userEnv, internalEnv, nil
+}

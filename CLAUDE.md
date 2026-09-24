@@ -39,11 +39,13 @@ make fmt            # gofmt
 
 **towline-mcp** (Go binary, forked from github.com/portainer/portainer-mcp):
 - Runs per-project as an MCP server process spawned by the AI agent
-- Adds four middleware layers on top of upstream Portainer MCP handlers:
+- Adds middleware layers on top of upstream Portainer MCP handlers (`internal/middleware`, chained in `cmd/towline-mcp/main.go`, outermost first):
+  - Compose security policy — rejects privileged mode, host namespaces, host bind mounts, devices, added capabilities, and host-file `secrets`/`configs`/`env_file` in create/update stack calls (dev and prod)
+  - Tier-based access control (`-tier dev|prod`) with approval webhook integration (`-approval-webhook` URL) — prod changes need a human's approval via the external approval server; with no webhook configured they are refused
   - Stack-name scoping (`-stack` flag) — filters all API responses to a single stack
-  - Tier-based access control (`-tier dev|prod`) — gates destructive prod operations
-  - Approval webhook integration (`-approval-webhook` URL) — external approval for prod changes
-  - Container ownership assertion — validates compose project labels before Docker proxy calls
+  - Env filter — agents cannot set `_TOWLINE_*` vars; updates carry the stack's internal vars over and record deployment history
+  - Container ownership assertion — normalizes Docker API paths (version prefix, rejects `?`/`%`/`..`), allows only lifecycle mutations on the stack's own containers, and validates compose project labels before Docker proxy calls
+- The Portainer token is read from `TOWLINE_PORTAINER_TOKEN` (preferred; keeps it out of `ps`) or `-token`
 - Fork additions are confined to new files (middleware package, config extensions) and modified entry point — no upstream handler changes
 - Exposes high-level tools (`towline_service_health`, `towline_service_logs`, `towline_env_get/set`, `towline_domains_*`, `towline_scale`, `towline_deployments`, `towline_exec`) on top of upstream's stack CRUD and Docker proxy
 
@@ -54,18 +56,20 @@ make fmt            # gofmt
 
 ### Three-layer permissions model
 
-1. **Portainer team-scoped API keys** — the hard security boundary. Each project gets a dedicated team. Even if all other layers fail, Portainer rejects cross-project requests.
+1. **Portainer team-scoped API keys** — the hard security boundary. Each project gets a dedicated team with the "Standard user" environment role (RoleId 4, never Environment administrator), so Portainer rejects cross-project requests even if all other layers fail. The agent holds this key and can call Portainer directly, so the MCP layers below cannot be the only line of defense.
 2. **MCP stack-name filtering** — agent experience layer. Filters Docker proxy responses by `com.docker.compose.project` label. Keeps agent context clean and provides specific error messages for out-of-scope requests.
-3. **Tier-based approval gating** — deployment control layer. Dev tier: full autonomy. Prod tier: read/operational ops are immediate; configuration/deploy/destructive/exec operations require webhook approval.
+3. **Tier-based approval gating** — deployment control layer. Dev tier: full autonomy. Prod tier: read/operational ops are immediate; configuration/deploy/destructive/exec operations require webhook approval. Holding an approval token never authorizes anything by itself; only the approval server's decision does.
 
 ### Approval webhook contract
 
 ```
 POST /           — receive approval request (id, project, action, description, stackContent)
-GET  /{id}       — poll status (pending | approved | rejected)
-POST /{id}/approve — approve
-POST /{id}/reject  — reject
+GET  /{id}       — poll status: {"status": "pending" | "approved" | "rejected"}
+POST /{id}/approve — approve (human only)
+POST /{id}/reject  — reject (human only)
 ```
+
+towline-mcp only calls `POST /` and `GET /{id}` (with `Authorization: Bearer $TOWLINE_APPROVAL_WEBHOOK_TOKEN` if set). The first call to a gated tool submits the request and returns `approvalToken` (the request id); the agent re-calls with identical arguments plus `approvalToken`, and the call proceeds only once `GET /{id}` returns `approved`. Tokens are single-use, bound to tool + arguments, and expire after 30 minutes. The approval server must authenticate approve/reject; the agent must not be able to reach those endpoints.
 
 ### MCP tool categories
 
@@ -83,7 +87,7 @@ POST /{id}/reject  — reject
 | Configuration (env_set, domains_add/remove) | Yes |
 | Deploy (create/update stack) | Yes |
 | Destructive (delete/stop stack) | Yes |
-| Exec, Docker proxy non-GET | Yes |
+| Exec, Docker proxy non-GET (except container start/stop/restart) | Yes |
 
 ## Implementation phases
 
@@ -101,6 +105,9 @@ The project follows this roadmap:
 - **No cloud dependencies**: fully self-hostable. Runs wherever Portainer runs.
 - **Tool design principle**: every tool answers a developer question in one call. Agents should never need raw Docker API calls for common operations.
 - **Partial compose files are dangerous**: when updating a stack via `updateLocalStack`, the COMPLETE compose file must be submitted. Portainer removes any service not included.
+- **Untrusted agent input**: treat every tool argument as attacker-controlled. Validate paths, names, and compose content before they reach Portainer, Docker, or a proxy backend, and fail closed.
+- **Secrets on disk**: generated files containing the project token (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are written 0600 and gitignored. The CLI verifies TLS unless `skip_tls_verify` was chosen at setup.
+- **`towline.json` is agent-writable**: never trust its IDs with the admin key without re-verifying names against Portainer (see `towline destroy`).
 
 ## Prerequisites
 
@@ -113,7 +120,8 @@ The project follows this roadmap:
 
 ```
 ~/projects/<name>/
-├── .claude/settings.json   # Scoped Portainer MCP configuration
+├── .mcp.json               # MCP server config (token in env, 0600, gitignored)
+├── .claude/settings.json   # Tool permissions for the scoped MCP server
 ├── CLAUDE.md               # Project-specific agent instructions
 ├── docker-compose.yml      # From template
 ├── .env.example            # Env var template

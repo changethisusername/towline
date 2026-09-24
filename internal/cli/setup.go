@@ -29,6 +29,20 @@ func runSetup(args []string) error {
 		return fmt.Errorf("Portainer URL is required")
 	}
 
+	// TLS verification is on unless the user opts out for a self-signed cert
+	skipTLSVerify := false
+	if strings.HasPrefix(strings.ToLower(portainerURL), "https://") {
+		fmt.Print("Does Portainer use a self-signed certificate? Skipping verification exposes your admin credentials to network attackers. [y/N]: ")
+		answer, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		skipTLSVerify = answer == "y" || answer == "yes"
+	} else {
+		fmt.Println("Warning: Portainer URL is not HTTPS; credentials and API keys will be sent in cleartext.")
+	}
+
 	// Prompt for username
 	fmt.Print("Portainer admin username: ")
 	username, err := reader.ReadString('\n')
@@ -54,7 +68,7 @@ func runSetup(args []string) error {
 	// Authenticate
 	fmt.Println()
 	fmt.Print("Authenticating... ")
-	api := config.NewPortainerAPI(portainerURL)
+	api := config.NewPortainerAPI(portainerURL, skipTLSVerify)
 	jwt, err := api.Authenticate(username, password)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
@@ -145,12 +159,22 @@ func runSetup(args []string) error {
 		projectsDir = home + projectsDir[1:]
 	}
 
+	// Prompt for approval webhook (needed for prod-tier projects)
+	fmt.Print("Approval webhook URL for prod-tier projects (optional, press Enter to skip): ")
+	approvalWebhook, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read input: %w", err)
+	}
+	approvalWebhook = strings.TrimSpace(approvalWebhook)
+
 	// Save configuration
 	cfg := &config.GlobalConfig{
 		PortainerURL:    portainerURL,
 		PortainerAPIKey: apiToken,
 		PortainerEnvID:  envID,
 		ProjectsDir:     projectsDir,
+		SkipTLSVerify:   skipTLSVerify,
+		ApprovalWebhook: approvalWebhook,
 	}
 
 	if err := config.SaveGlobalConfig(cfg); err != nil {

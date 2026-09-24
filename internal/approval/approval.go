@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	TokenTTL        = 5 * time.Minute
+	// TokenTTL bounds how long a human has to act on an approval request.
+	TokenTTL        = 30 * time.Minute
 	CleanupInterval = 30 * time.Second
 )
 
@@ -72,6 +73,33 @@ func (s *Store) Validate(token string, currentArgs map[string]any) *PendingAppro
 	}
 
 	return p
+}
+
+// Peek returns the pending approval for a token without consuming it, or nil
+// if the token is unknown, expired, or was issued for different arguments.
+func (s *Store) Peek(token string, currentArgs map[string]any) *PendingApproval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, ok := s.pending[token]
+	if !ok {
+		return nil
+	}
+	if time.Since(p.CreatedAt) > TokenTTL {
+		delete(s.pending, token)
+		return nil
+	}
+	if hashArgs(currentArgs) != p.ArgsHash {
+		return nil
+	}
+	return p
+}
+
+// Consume removes a token so it cannot be used again.
+func (s *Store) Consume(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, token)
 }
 
 // hashArgs produces a deterministic hash of tool arguments, excluding

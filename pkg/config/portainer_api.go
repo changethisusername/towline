@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
+
+// StandardUserRoleID is Portainer's "Standard user" environment role.
+const StandardUserRoleID = 4
 
 // PortainerAPI is a lightweight HTTP client for Portainer REST API endpoints
 // not available in the upstream SDK. Used by the CLI for setup and provisioning.
@@ -18,15 +22,17 @@ type PortainerAPI struct {
 	client  *http.Client
 }
 
-// NewPortainerAPI creates a new Portainer API client.
-func NewPortainerAPI(baseURL string) *PortainerAPI {
+// NewPortainerAPI creates a new Portainer API client. TLS certificates are
+// verified unless skipTLSVerify is set (for self-signed certificates); that
+// option exposes the admin credentials to anyone who can intercept traffic.
+func NewPortainerAPI(baseURL string, skipTLSVerify bool) *PortainerAPI {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if skipTLSVerify {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	return &PortainerAPI{
 		BaseURL: strings.TrimRight(baseURL, "/"),
-		client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		},
+		client:  &http.Client{Transport: transport},
 	}
 }
 
@@ -59,6 +65,10 @@ func (p *PortainerAPI) doRequest(method, path string, body []byte) (*http.Respon
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		var certErr *tls.CertificateVerificationError
+		if errors.As(err, &certErr) {
+			return nil, fmt.Errorf("failed to verify Portainer's TLS certificate (for a self-signed certificate, re-run 'towline setup' and choose to skip verification): %w", err)
+		}
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 
@@ -241,7 +251,10 @@ func (p *PortainerAPI) SetEndpointTeamAccess(endpointID, teamID int) error {
 		teamAccessPolicies = existing
 	}
 	teamAccessPolicies[fmt.Sprintf("%d", teamID)] = map[string]any{
-		"RoleId": 1, // environment administrator — needed for stack CRUD
+		// Standard user: can manage stacks it owns, but not other teams'
+		// resources. Environment administrator (1) would let every project's
+		// key manage every other project's stacks on the shared environment.
+		"RoleId": StandardUserRoleID,
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -367,4 +380,56 @@ func (p *PortainerAPI) DeleteStack(stackID, endpointID int) error {
 	}
 
 	return nil
+}
+
+// StackInfo is the subset of a Portainer stack used to verify ownership.
+type StackInfo struct {
+	ID         int    `json:"Id"`
+	Name       string `json:"Name"`
+	EndpointID int    `json:"EndpointId"`
+}
+
+// GetStack returns a stack by ID.
+func (p *PortainerAPI) GetStack(stackID int) (*StackInfo, error) {
+	var out StackInfo
+	if err := p.getJSON(fmt.Sprintf("/api/stacks/%d", stackID), &out); err != nil {
+		return nil, fmt.Errorf("failed to get stack: %w", err)
+	}
+	return &out, nil
+}
+
+// GetTeamName returns the name of a team by ID.
+func (p *PortainerAPI) GetTeamName(teamID int) (string, error) {
+	var out struct {
+		Name string `json:"Name"`
+	}
+	if err := p.getJSON(fmt.Sprintf("/api/teams/%d", teamID), &out); err != nil {
+		return "", fmt.Errorf("failed to get team: %w", err)
+	}
+	return out.Name, nil
+}
+
+// GetUsername returns the username of a user by ID.
+func (p *PortainerAPI) GetUsername(userID int) (string, error) {
+	var out struct {
+		Username string `json:"Username"`
+	}
+	if err := p.getJSON(fmt.Sprintf("/api/users/%d", userID), &out); err != nil {
+		return "", fmt.Errorf("failed to get user: %w", err)
+	}
+	return out.Username, nil
+}
+
+func (p *PortainerAPI) getJSON(path string, out any) error {
+	resp, err := p.doRequest("GET", path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }

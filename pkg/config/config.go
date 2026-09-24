@@ -15,6 +15,12 @@ type GlobalConfig struct {
 	PortainerAPIKey string `yaml:"portainer_admin_key"`
 	PortainerEnvID  int    `yaml:"portainer_env_id"`
 	ProjectsDir     string `yaml:"projects_dir"`
+	// SkipTLSVerify disables certificate verification for a self-signed
+	// Portainer certificate. Off by default.
+	SkipTLSVerify bool `yaml:"skip_tls_verify,omitempty"`
+	// ApprovalWebhook is the approval server URL passed to prod-tier MCP
+	// servers. Without it, prod operations that need approval are refused.
+	ApprovalWebhook string `yaml:"approval_webhook,omitempty"`
 }
 
 // ProjectConfig holds per-project configuration stored at towline.json in the project root.

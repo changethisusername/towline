@@ -423,11 +423,14 @@ func TestHandleEnvSet_NewVar(t *testing.T) {
 	cli.On("GetLocalStacks").Return(stacks, nil)
 	cli.On("GetLocalStackFile", testStackID).Return(sampleComposeFile, nil)
 	cli.On("UpdateLocalStack", testStackID, testEnvID, sampleComposeFile, mock.MatchedBy(func(env []models.LocalStackEnvVar) bool {
-		if len(env) != 2 {
+		if len(env) != 3 {
 			return false
 		}
 		return env[0].Name == "EXISTING" && env[0].Value == "value1" &&
-			env[1].Name == "NEW_VAR" && env[1].Value == "new_value"
+			env[1].Name == "NEW_VAR" && env[1].Value == "new_value" &&
+			env[2].Name == "_TOWLINE_DEPLOYMENTS" &&
+			strings.Contains(env[2].Value, "Set environment variable NEW_VAR") &&
+			!strings.Contains(env[2].Value, "new_value")
 	}), false, false).Return(nil)
 
 	h := setupHandlers(t, cli, nil)
@@ -454,11 +457,12 @@ func TestHandleEnvSet_ExistingVar(t *testing.T) {
 	cli.On("GetLocalStacks").Return(stacks, nil)
 	cli.On("GetLocalStackFile", testStackID).Return(sampleComposeFile, nil)
 	cli.On("UpdateLocalStack", testStackID, testEnvID, sampleComposeFile, mock.MatchedBy(func(env []models.LocalStackEnvVar) bool {
-		if len(env) != 2 {
+		if len(env) != 3 {
 			return false
 		}
 		return env[0].Name == "EXISTING" && env[0].Value == "updated_value" &&
-			env[1].Name == "OTHER" && env[1].Value == "keep"
+			env[1].Name == "OTHER" && env[1].Value == "keep" &&
+			env[2].Name == "_TOWLINE_DEPLOYMENTS"
 	}), false, false).Return(nil)
 
 	h := setupHandlers(t, cli, nil)
@@ -877,4 +881,29 @@ func TestRecordDeployment(t *testing.T) {
 	require.NoError(t, err)
 
 	cli.AssertExpectations(t)
+}
+
+func TestPrepareStackUpdate(t *testing.T) {
+	cli := new(mockPortainerClient)
+	history := `[{"id":3,"timestamp":"2026-01-01T00:00:00Z","description":"scale","outcome":"deployed"}]`
+	cli.On("GetLocalStacks").Return(defaultStacks(
+		models.LocalStackEnvVar{Name: "USER_VAR", Value: "x"},
+		models.LocalStackEnvVar{Name: "_TOWLINE_DEPLOYMENTS", Value: history},
+	), nil)
+	cli.On("GetLocalStackFile", testStackID).Return("services:\n  web:\n    image: nginx:1\n", nil)
+
+	h := setupHandlers(t, cli, nil)
+	userEnv, internalEnv, err := h.PrepareStackUpdate("services:\n  web:\n    image: nginx:2\n")
+	require.NoError(t, err)
+
+	assert.Equal(t, []models.LocalStackEnvVar{{Name: "USER_VAR", Value: "x"}}, userEnv)
+	require.Len(t, internalEnv, 1)
+	assert.Equal(t, "_TOWLINE_DEPLOYMENTS", internalEnv[0].Name)
+
+	var entries []DeploymentEntry
+	require.NoError(t, json.Unmarshal([]byte(internalEnv[0].Value), &entries))
+	require.Len(t, entries, 2)
+	assert.Equal(t, 4, entries[1].ID)
+	assert.Contains(t, entries[1].Diff, "+     image: nginx:2")
+	assert.Contains(t, entries[1].Diff, "-     image: nginx:1")
 }
