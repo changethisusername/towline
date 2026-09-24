@@ -60,8 +60,10 @@ towline-mcp \\
         <p>
           The token is passed via the <code>TOWLINE_PORTAINER_TOKEN</code> environment variable (the config&apos;s{" "}
           <code>env</code> block), not on the command line. Prod-tier configs also pass{" "}
-          <code>-approval-webhook &lt;url&gt;</code>, and <code>-skip-tls-verify</code> is added only when the user
-          said Portainer uses a self-signed certificate.
+          <code>-approval-mode human|agent</code> (plus <code>-approval-webhook &lt;url&gt;</code> and a{" "}
+          <code>TOWLINE_APPROVAL_WEBHOOK_TOKEN</code> env var in human mode). <code>-skip-tls-verify</code> is added only
+          when the user said Portainer uses a self-signed certificate, and <code>-allow-bind-mounts</code> /{" "}
+          <code>-compose-policy off</code> only when the user relaxed the compose policy for the project.
         </p>
         <p>
           This MCP server process is your gateway to the Portainer environment. Every tool call you make goes
@@ -74,7 +76,8 @@ towline-mcp \\
           <li><strong>Compose security policy</strong> — compose files that could reach the host (privileged mode, host bind
           mounts, host networking, etc.) are rejected in every tier (see <a href="#compose-policy">Compose Security Policy</a>).</li>
           <li><strong>Tier gating</strong> — In <code>dev</code> tier, you have full autonomy. In <code>prod</code> tier,
-          deploys, configuration changes, exec, and destructive operations require approval from a human via an external approval server.</li>
+          deploys, configuration changes, exec, and destructive operations require approval: from a human via an approval
+          server (human mode), or your own explicit confirmation (agent mode).</li>
         </ul>
 
         <h2 id="tools-reference">MCP Tools Reference</h2>
@@ -228,7 +231,13 @@ towline-mcp \\
           <li><code>env_file</code> outside the stack directory</li>
           <li>Top-level <code>include</code> / <code>extends</code></li>
         </ul>
-        <p>Named volumes and <code>tmpfs</code> are fine. If a compose file is rejected, fix it rather than working around the policy.</p>
+        <p>
+          Named volumes and <code>tmpfs</code> are fine. If a compose file is rejected, fix it rather than working around the policy.
+          If the stack genuinely needs a host path, ask the human: they can allow specific bind mounts (or turn the policy
+          off) under <code>compose_policy</code> in the project&apos;s <code>towline.json</code> and run{" "}
+          <code>towline refresh</code>. You cannot change the policy yourself. The other rules still apply when bind mounts
+          are allowed, and <code>..</code>, <code>~</code> and <code>{"${VAR}"}</code> sources are always rejected.
+        </p>
 
         <h2 id="tier-system">Tier System &amp; Approval Flow</h2>
         <p>The <code>-tier</code> flag controls what you can do without human approval:</p>
@@ -251,20 +260,39 @@ towline-mcp \\
 
         <h3>How Approval Works</h3>
         <p>
-          Approval comes from a <strong>human</strong> via an external approval server configured with{" "}
-          <code>-approval-webhook</code>. You cannot approve your own requests, and a &quot;yes&quot; in the chat does not approve anything.
+          The human chooses one of two approval modes (<code>-approval-mode human|agent</code>). The first call to a gated
+          tool runs nothing and returns an <code>approvalToken</code> with one of two messages; the message tells you which
+          mode is active.
+        </p>
+
+        <h4>&quot;Production operation requires human approval&quot; (human mode)</h4>
+        <p>
+          Approval comes from a <strong>human</strong> via an approval server (Towline&apos;s built-in{" "}
+          <code>towline approvals serve</code>, or the user&apos;s own). You cannot approve your own requests, and a
+          &quot;yes&quot; in the chat does not approve anything.
         </p>
         <ol>
           <li>You call a tool that requires approval (e.g. <code>updateLocalStack</code> in prod)</li>
           <li><code>towline-mcp</code> sends the request to the approval server; the response contains an <code>approvalToken</code> (the request ID). Nothing has run yet.</li>
-          <li>Tell the human what the change does, then wait until they tell you they have approved or rejected it in their approval system</li>
+          <li>Tell the human what the change does, then wait until they tell you they have approved or rejected it (in the approval UI, with <code>towline approvals approve &lt;id&gt;</code>, or via a notification)</li>
           <li>Re-call the same tool with identical arguments plus the <code>approvalToken</code> parameter</li>
-          <li>If approved, the call executes. If still pending, nothing runs — wait for the human again; do not re-call in a loop. If rejected, the call is refused — do not retry without discussing it.</li>
+          <li>If approved, the call executes. If still pending, nothing runs — wait for the human again; do not re-call in a loop. If rejected, the call is refused — do not retry without discussing it. Requests not decided within 30 minutes expire and are reported as rejected.</li>
         </ol>
         <p>
-          Tokens are single-use, expire after 30 minutes, and are bound to the specific tool and arguments.
-          You cannot reuse a token with different arguments. If no approval webhook is configured, prod operations
-          that need approval are refused — ask the human to configure one or make the change themselves.
+          If human mode is active but no approval server is configured, prod operations that need approval are refused —
+          ask the human to run <code>towline approvals setup</code> or to make the change themselves.
+        </p>
+
+        <h4>&quot;Production operation requires confirmation&quot; (agent mode)</h4>
+        <p>
+          For autonomous setups, the human has put you in charge of prod operations. This is an explicit confirmation
+          step, not a formality: review what the change does to production (the exact arguments, the full compose file for
+          deploys, possible downtime or data loss), then confirm by re-calling the same tool with identical arguments plus
+          the <code>approvalToken</code>. The operation then executes.
+        </p>
+        <p>
+          In both modes, tokens are single-use, expire after 30 minutes, and are bound to the specific tool and arguments.
+          You cannot reuse a token with different arguments; call again without <code>approvalToken</code> to get a new one.
         </p>
 
         <h2 id="common-workflows">Common Agent Workflows</h2>
@@ -324,8 +352,33 @@ Flags:
         <h3><code>towline setup</code></h3>
         <p>
           Interactive setup: connects to a Portainer instance (verifying its TLS certificate unless the user says it is
-          self-signed), asks for an optional approval webhook URL for prod tier, and saves credentials.
+          self-signed), asks how prod operations are approved (human or agent), and saves credentials. Re-running it keeps
+          existing approval settings.
         </p>
+
+        <h3><code>towline approvals</code></h3>
+        <p>Configure and run prod-tier approvals. Only the human should run these.</p>
+        <pre><code>{`towline approvals setup [--mode human|agent] [--listen addr] [--url external-server]
+                        [--webhook-token t] [--ntfy topic-url] [--public-url url]
+towline approvals serve            # built-in approval server, web UI at /ui (default 127.0.0.1:8787)
+towline approvals list             # these three prompt for the human's approver token
+towline approvals approve <id>
+towline approvals reject <id>`}</code></pre>
+        <p>
+          The approver token is shown once at setup and read from a terminal prompt, never from env vars or flags. Never
+          ask the human for it or try to obtain it.
+        </p>
+
+        <h3><code>towline refresh</code></h3>
+        <p>
+          Brings existing projects up to date after <code>towline update</code>: rewrites the <code>towline-&lt;tier&gt;</code>{" "}
+          entry in the MCP configs (keeping other servers and custom flags), moves the token into an env var, applies the
+          approval mode and compose policy, fixes permissions and <code>.gitignore</code>, and moves the project team to
+          the Standard user role. The human restarts agent sessions afterwards.
+        </p>
+        <pre><code>{`towline refresh --all          # every project
+towline refresh <name>...      # specific projects (or no argument inside a project)
+  --keep-role                  # don't change the team role`}</code></pre>
 
         <h2 id="project-structure">Generated Project Structure</h2>
         <pre><code>{`~/projects/<name>/

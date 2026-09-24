@@ -72,7 +72,7 @@ The installer verifies every archive's SHA-256 against the release's `checksums.
 towline setup
 ```
 
-Points Towline at your Portainer instance (CE 2.28+). Interactive wizard — takes 30 seconds. Portainer's TLS certificate is verified unless you tell the wizard it's self-signed. It also asks for an optional approval webhook URL, needed for prod-tier projects.
+Points Towline at your Portainer instance (CE 2.28+). Interactive wizard — takes 30 seconds. Portainer's TLS certificate is verified unless you tell the wizard it's self-signed. It also asks how prod-tier operations should be approved: by a human in Towline's built-in approval server (recommended), or by the agent itself (for autonomous setups). Re-running `towline setup` keeps your existing approval settings; change them any time with `towline approvals setup`.
 
 ### 3. Create a project
 
@@ -170,32 +170,46 @@ Each project gets a dedicated Portainer team with its own API key. The team gets
 
 **Layer 2 — MCP stack filtering** (agent experience)
 Docker API responses are filtered to show only this project's containers. Clear error messages if an agent references anything out of scope. On top of that:
-- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged`, `cap_add`, `devices`, host/container `network_mode`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts` or non-local drivers, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), and top-level `include`/`extends`. Named volumes and tmpfs are fine.
+- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged`, `cap_add`, `devices`, host/container `network_mode`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts` or non-local drivers, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), and top-level `include`/`extends`. Named volumes and tmpfs are fine. Specific bind mounts can be allowed per project in `towline.json` (see [Per-project](#per-project-towlinejson)).
 - **Restricted `dockerProxy`**: the only mutations allowed are container lifecycle actions (`start`, `stop`, `restart`, `kill`, `pause`, `unpause`, `wait`, `resize`, `rename`, `update`) and `DELETE /containers/{id}` on the stack's own containers, in the stack's own environment. Container create, exec, archive upload, and anything on networks, volumes, images, or system are rejected, as are paths with query strings, `%`-encoding, `..` segments and similar tricks.
 
-**Layer 3 — Tier-based approval** (human control)
-In `dev` tier, agents have full autonomy. In `prod` tier, deploys, configuration changes, exec, and destructive operations need approval from a human, via an external approval server you configure (`towline setup` asks for its URL). The agent cannot approve its own requests.
+**Layer 3 — Tier-based approval** (deployment control)
+In `dev` tier, agents have full autonomy. In `prod` tier, deploys, configuration changes, exec, and destructive operations need approval. You choose the approval mode at `towline setup` (or later with `towline approvals setup`); it's stored as `approval.mode` in `~/.towline/config.yaml` and passed to `towline-mcp` as `-approval-mode human|agent`.
+
+**Human mode (recommended)** — a human approves each gated operation in an approval server. Towline ships one:
+
+```bash
+towline approvals setup --mode human   # generates tokens; prints your approver token ONCE
+towline approvals serve                # listens on 127.0.0.1:8787, web UI at /ui
+```
 
 ```
 Agent: "Production operation requires human approval.
         Action: updateLocalStack
         An approval request has been sent (ID a1b2c3d4)."
 
-You: [approve the request in your approval server]
+You: [approve it at http://127.0.0.1:8787/ui, or: towline approvals approve a1b2c3d4]
 
 Agent: [re-calls with the token] → [deploys] → [verifies health] → "All services healthy."
 ```
 
-When the agent calls a gated tool, `towline-mcp` POSTs `{id, project, action, description, stackContent}` to the approval webhook and returns an `approvalToken`. Re-calling with identical arguments and that token runs the operation only once the approval server reports `approved` (a `pending` status runs nothing; `rejected` refuses). Tokens are single-use, bound to the tool and exact arguments, and expire after 30 minutes. With no webhook configured, prod operations that need approval are refused.
-
-The approval server contract:
+- `approvals setup` generates a **webhook token** (put in the generated MCP config as `TOWLINE_APPROVAL_WEBHOOK_TOKEN`; it can only submit and poll requests, never approve) and an **approver token**, shown once (only its SHA-256 is stored). Use the approver token to log in to the UI or with `towline approvals list | approve <id> | reject <id>`, which prompt for it on stdin — deliberately not read from env vars or flags, so agents in the same shell can't pick it up.
+- Optional: `--ntfy <topic URL>` for push notifications, `--public-url` for the link in them, `--listen` to change the address (a warning is printed if it listens beyond localhost — put it behind HTTPS).
+- The built-in server keeps requests in memory: restarting it drops pending requests (the agent just requests again).
+- To use your own server instead: `towline approvals setup --mode human --url <server> [--webhook-token <token>]`. It must implement:
 
 ```
 POST /       — receive approval request (id, project, action, description, stackContent)
 GET  /{id}   — return {"status": "pending" | "approved" | "rejected"}
 ```
 
-How humans approve or reject (e.g. `POST /{id}/approve`, `POST /{id}/reject`) is up to the approval server — but it must authenticate whoever approves, and those endpoints must not be reachable by the agent. An optional bearer token for the webhook can be supplied via `TOWLINE_APPROVAL_WEBHOOK_TOKEN`.
+How humans approve on an external server is up to it — but it must authenticate whoever approves, and those endpoints must not be reachable by the agent.
+
+When the agent calls a gated tool, `towline-mcp` sends the request and returns an `approvalToken`. Re-calling with identical arguments and that token runs the operation only once the server reports `approved` (`pending` runs nothing; `rejected` refuses). Tokens are single-use, bound to the tool and exact arguments, and expire after 30 minutes; undecided requests expire and are reported as rejected. If human mode is chosen but no approval server URL is configured, prod operations that need approval are refused.
+
+**Agent mode** — for autonomous/agentic setups where the agent operating the MCP is in charge. The first call returns an `approvalToken`; the agent confirms by re-calling with identical arguments plus the token (single-use, bound to tool and exact arguments, 30 minutes). This is an explicit confirmation step, not a human gate.
+
+If no mode is set (configs from earlier releases, or `towline-mcp` run without `-approval-mode`), the mode is human if `-approval-webhook` is set and agent otherwise — the previous behavior, so existing prod projects keep working after upgrading.
 
 ---
 
@@ -263,7 +277,12 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 | `towline setup` | Connect to your Portainer instance |
 | `towline init <name>` | Create a project with full provisioning |
 | `towline list` | List all projects |
-| `towline destroy <name>` | Tear down Portainer resources (each ID in `towline.json` is verified against Portainer first; mismatches are skipped) |
+| `towline destroy <name>` | Tear down Portainer resources (each ID in `towline.json` is verified against Portainer first; mismatches are skipped). Also works for projects created before name validation |
+| `towline refresh [--all \| <name>...]` | Bring existing projects up to date with this release (see [Upgrading](#upgrading)) |
+| `towline approvals setup` | Choose human or agent approval for prod operations |
+| `towline approvals serve` | Run the built-in approval server (web UI at `/ui`) |
+| `towline approvals list \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
+| `towline update` | Update Towline to the latest release |
 | `towline promote <name>` | Add prod tier *(coming soon)* |
 | `towline rotate-keys <name>` | Rotate API credentials *(coming soon)* |
 | `towline status <name>` | Live stack health *(coming soon)* |
@@ -289,15 +308,51 @@ portainer_url: "https://192.168.1.50:9443"
 portainer_admin_key: "ptr_xxxx..."
 portainer_env_id: 2
 projects_dir: "~/projects"
-skip_tls_verify: true                          # only if you said Portainer uses a self-signed cert
-approval_webhook: "https://approvals.mylab.local"  # optional; required for prod-tier approvals
+skip_tls_verify: false        # true only if Portainer uses a self-signed cert
+approval:
+  mode: human                 # human or agent
+  url: "http://127.0.0.1:8787"  # approval server towline-mcp talks to
+  webhook_token: "..."        # towline-mcp -> approval server (submit/poll only)
+  listen: "127.0.0.1:8787"    # built-in server listen address
+  approver_token_hash: "..."  # SHA-256 of your approver token
+  ntfy_url: "https://ntfy.sh/my-private-topic"  # optional push notifications
+  public_url: "https://approvals.mylab.local"   # optional, for notification links
 ```
 
-The admin key is used only by the CLI for provisioning. It is never passed to agents. `towline init --tier prod` passes `approval_webhook` to the MCP server as `-approval-webhook` (and warns if it's missing); `skip_tls_verify` adds `-skip-tls-verify` to generated MCP configs.
+The admin key is used only by the CLI for provisioning. It is never passed to agents. Prod-tier MCP configs get `-approval-mode` (plus `-approval-webhook` and the webhook token in human mode); `skip_tls_verify: true` adds `-skip-tls-verify`.
+
+Configs from earlier releases have no `skip_tls_verify` key and keep skipping certificate verification as before, with a warning from the CLI. Set `skip_tls_verify: false` to verify (or `true` to keep skipping and silence the warning), or re-run `towline setup`, which asks. New setups verify by default.
 
 ### Per-project (`towline.json`)
 
 Created by `towline init`. Contains stack metadata and scoped credentials. The generated MCP configs (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`) pass the project token via the `TOWLINE_PORTAINER_TOKEN` env var and are written with `0600` permissions. All token-bearing files are in the generated `.gitignore`; in an existing codebase, `towline init` appends any missing entries to its `.gitignore`.
+
+`towline.json` can also relax the compose security policy for one project (edited by you, not the agent):
+
+```json
+"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."] }
+```
+
+An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `"mode": "off"` disables the policy. The other policy rules still apply when bind mounts are allowed. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-compose-policy off` into the MCP configs.
+
+---
+
+## Upgrading
+
+```bash
+towline update
+towline refresh --all     # or: towline refresh <name>...  (or plain `towline refresh` inside a project)
+```
+
+Existing projects keep working without `refresh` (legacy `-token` flag, agent-confirmed prod approvals) — they just don't get this release's hardening. `refresh`, per project:
+
+- rewrites only the `towline-<tier>` entry in `.mcp.json`, `.cursor/mcp.json` and `.gemini/settings.json` — other MCP servers, user-added flags (`-proxy`, `-caddy-api`, …) and extra env vars are kept; the token moves from `-token` to the `TOWLINE_PORTAINER_TOKEN` env var; approval mode and compose policy are applied
+- makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings
+- fixes permissions (`0600` files, `0700` dirs) and `.gitignore`, and warns if token-bearing files are tracked by git (`git rm --cached`; revoke the token if the repo was pushed)
+- moves the project team to the Standard user role, after checking the team is `team-<stack>` (`--keep-role` skips this)
+- on first run, allows the deployed stack's existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
+
+Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).
 
 ---
 
@@ -332,7 +387,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for project structure and development wor
 
 **Now**: Portainer deployment with three-layer permissions, 10 MCP tools, template packs with skills and MCP configs.
 
-**Next**: `towline promote` (dev-to-prod workflow), `towline rotate-keys`, `towline status`, approval server integrations (Telegram, ntfy.sh).
+**Next**: `towline promote` (dev-to-prod workflow), `towline rotate-keys`, `towline status`, more approval integrations (e.g. Telegram).
 
 **Later**: Encrypted keystore. Community pack registry. Plugin system for custom tools.
 

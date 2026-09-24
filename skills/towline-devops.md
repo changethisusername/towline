@@ -11,32 +11,56 @@ the services within your project's stack. Treat this stack as your entire
 infrastructure.
 
 Your stack has a tier: dev or prod. In dev, you have full autonomy. In prod,
-deploys, configuration changes, exec, and destructive actions require a human
-to approve them through an external approval server. You cannot approve your
-own requests, and your partner saying "yes" in chat does not approve anything.
+deploys, configuration changes, exec, and destructive actions need approval.
+Depending on how your partner set up Towline, that approval comes either from
+a human in an approval server (human mode) or from your own explicit
+confirmation (agent mode). The first call to a gated tool tells you which.
 
 ## Prod approval flow
 
-1. Call the gated tool normally. The request is sent to the approval server
-   and the tool returns a message with an approvalToken (the request ID).
-   Nothing has run yet.
-2. Tell your partner exactly what the change does and ask them to approve it
-   in their approval system. Then STOP and wait for them to tell you they
-   have approved or rejected it.
-3. Only then re-call the same tool with IDENTICAL arguments plus the
+Call the gated tool normally. Nothing runs yet: the tool returns an
+approvalToken and one of two messages.
+
+### "Production operation requires human approval"
+
+The request has been sent to your partner's approval server. You cannot
+approve your own requests, and your partner saying "yes" in chat does not
+approve anything — only the approval server's decision counts.
+
+1. Tell your partner exactly what the change does and ask them to approve it
+   (in the approval UI, with `towline approvals approve <id>`, or via their
+   notification). Then STOP and wait for them to tell you they have approved
+   or rejected it.
+2. Only then re-call the same tool with IDENTICAL arguments plus the
    approvalToken parameter:
    - approved: the operation executes (the token is single-use).
    - still pending: nothing runs. Wait for your partner again. Do NOT
      re-call in a loop to poll.
    - rejected: the operation is refused. Do not retry without discussing it
-     with your partner.
-4. Tokens are bound to the tool name and exact arguments and expire after 30
-   minutes. If you change any argument, or the token expires, call again
-   without approvalToken to create a new request.
+     with your partner. Requests nobody decides on within 30 minutes expire
+     and are reported as rejected; ask your partner before requesting again.
 
-If the tool says no approval webhook is configured, prod operations that need
-approval are refused. Ask your partner to configure one, or to make the change
-themselves. Do not look for another tool to achieve the same change.
+If the tool says approval is required but no approval webhook is configured,
+the operation is refused. Ask your partner to set up approvals
+(`towline approvals setup`) or to make the change themselves. Do not look
+for another tool to achieve the same change.
+
+### "Production operation requires confirmation"
+
+Agent approval mode: you are the one in charge of this operation. This is a
+deliberate confirmation step, not a formality.
+
+1. Review what the change does to production: the exact arguments, the full
+   compose file for deploys, and whether it could cause downtime or data
+   loss. If in doubt, check with your partner first.
+2. To confirm, re-call the same tool with IDENTICAL arguments plus the
+   approvalToken parameter. The operation then executes.
+
+### Both modes
+
+Tokens are single-use, bound to the tool name and exact arguments, and
+expire after 30 minutes. If you change any argument, or the token expires,
+call again without approvalToken to get a new one.
 
 ## Tool inventory
 
@@ -145,7 +169,11 @@ that use any of:
 
 Use named volumes (or tmpfs) for storage and towline_env_set for config. If
 a compose file is rejected, fix it — don't try to work around the policy. If
-the stack genuinely needs one of these, tell your partner.
+the stack genuinely needs one of these, tell your partner: they can allow
+specific host paths for bind mounts (or turn the policy off) for this project.
+You cannot change the policy yourself. Even with bind mounts allowed, the
+other rules still apply, and `..`, `~` and `${VAR}` sources are always
+rejected.
 
 ## Decision framework
 
@@ -257,11 +285,12 @@ if postgres isn't ready.
 Scaling stateful services: Don't scale services with persistent volume mounts
 to multiple replicas. You'll get data corruption or mount conflicts.
 
-Polling for approval: Don't re-call a gated prod tool over and over while the
-approval is pending. Tell your partner what needs approving and wait for them.
+Polling for approval: Don't re-call a gated prod tool over and over while
+human approval is pending. Tell your partner what needs approving and wait for
+them. (In agent mode, re-call once with the token after reviewing the change.)
 
-Bind mounts: Host paths (./data, /srv/app, ~/x) are rejected. Use named
-volumes.
+Bind mounts: Host paths (./data, /srv/app, ~/x) are rejected unless your
+partner has allowed them for this project. Prefer named volumes.
 
 Ignoring exit codes: 137 = OOM killed (needs more memory). 1 = application
 error (check logs). 143 = SIGTERM (graceful shutdown, usually fine).

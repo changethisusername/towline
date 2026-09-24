@@ -53,7 +53,11 @@ It will prompt you for:
 3. **Admin username and password** — Towline authenticates once to generate a scoped admin API key. Your password is not stored.
 4. **Environment** — if you have multiple Docker environments in Portainer, select which one Towline should use for new projects.
 5. **Projects directory** — where new projects will be created (default: `~/projects`).
-6. **Approval webhook URL** (optional) — the external approval server used for prod-tier projects, stored as `approval_webhook`. Press Enter to skip; you can add it to `~/.towline/config.yaml` later. Without it, prod operations that need approval are refused.
+6. **Prod approval mode** — how prod-tier operations (deploys, config changes, exec) are approved:
+   - **Human** (recommended) — you approve each one in Towline's built-in approval server. Setup prints your **approver token once**; store it in your password manager and keep it away from your agents. Start the server with `towline approvals serve`.
+   - **Agent** — the agent confirms its own prod operations with an explicit second call. For autonomous/agentic setups.
+
+   Re-running `towline setup` keeps your existing approval settings. Change them any time with `towline approvals setup` (see the [User Guide](user-guide.md#choosing-an-approval-mode)).
 
 Towline saves the configuration to `~/.towline/config.yaml` with restricted file permissions (`0600`). The admin API key is used only by the CLI for provisioning — it is never passed to AI agents.
 
@@ -187,7 +191,10 @@ This gives you an app + PostgreSQL + Redis stack. Ask your agent to swap the Ngi
 towline init my-app --with-prod
 ```
 
-This creates both `my-app-dev` and `my-app-prod` stacks with separate teams and API keys. In the prod tier, deploys, configuration changes, exec, and destructive operations require a human to approve them through your external approval server (the `approval_webhook` from `towline setup`). The agent sends the request, tells you what it wants to do, and waits — it can't approve its own requests. If no approval webhook is configured, `towline init` warns you and those prod operations are refused.
+This creates both `my-app-dev` and `my-app-prod` stacks with separate teams and API keys. In the prod tier, deploys, configuration changes, exec, and destructive operations need approval, depending on the mode you chose at setup:
+
+- **Human mode**: keep `towline approvals serve` running. The agent sends the request, tells you what it wants to do, and waits. Approve it at `http://127.0.0.1:8787/ui` (log in with your approver token) or with `towline approvals approve <id>`; the agent then re-runs the call. Requests not decided within 30 minutes expire.
+- **Agent mode**: the agent gets a confirmation token on the first call and confirms by calling again with it. It's a deliberate second step, not a human gate.
 
 ### Add domain routing
 
@@ -217,6 +224,16 @@ The file at `skills/towline-devops.md` in each project is worth reading yourself
 - Common mistakes agents make and how to avoid them
 - Exit code meanings (137 = OOM, 1 = app error, 143 = graceful shutdown, etc.)
 
+## Upgrading
+
+After `towline update`, bring existing projects up to date:
+
+```bash
+towline refresh --all        # or: towline refresh my-app  (or plain `towline refresh` inside a project)
+```
+
+This updates each project's MCP configs (keeping your other MCP servers and custom flags), moves the token into an env var, applies your approval mode and compose policy, fixes file permissions and `.gitignore`, and moves the project team to the Standard user role (`--keep-role` skips that). Restart your agent sessions afterwards. Projects you don't refresh keep working as before — they just miss the new hardening. See the [User Guide](user-guide.md#upgrading) for details.
+
 ---
 
 ## Troubleshooting
@@ -237,9 +254,13 @@ Your Portainer admin API key may have insufficient permissions. Re-run `towline 
 
 Portainer is using a certificate your machine doesn't trust. If it's self-signed, re-run `towline setup` and answer yes when asked about a self-signed certificate.
 
+### "your ~/.towline/config.yaml predates TLS verification"
+
+Configs from earlier releases have no `skip_tls_verify` key and keep skipping certificate verification, as before. Add `skip_tls_verify: false` to `~/.towline/config.yaml` to verify Portainer's certificate, or `skip_tls_verify: true` to keep skipping and silence the warning (or re-run `towline setup`, which asks). Then run `towline refresh --all`.
+
 ### Agent says a compose file was rejected
 
-Towline's compose security policy blocks settings that could escape the container sandbox (privileged mode, host bind mounts, host networking, etc.). Use named volumes instead of bind mounts. See the [User Guide](user-guide.md#compose-security-policy) for the full list.
+Towline's compose security policy blocks settings that could escape the container sandbox (privileged mode, host bind mounts, host networking, etc.). Use named volumes instead of bind mounts. If a project genuinely needs a specific host path, you (not the agent) can allow it under `compose_policy` in the project's `towline.json` and run `towline refresh`. See the [User Guide](user-guide.md#compose-security-policy) for the full list.
 
 ### Agent says "no containers found for service"
 
@@ -269,7 +290,7 @@ Towline uses three independent layers to ensure project isolation:
 
 2. **MCP stack-name filtering** — the agent experience layer. Filters Docker API responses to show only the project's containers, rejects compose files that use privileged mode, host bind mounts, host networking and similar escapes, and limits `dockerProxy` writes to lifecycle actions on the stack's own containers. Provides clear error messages if an agent references something outside its scope.
 
-3. **Tier-based approval gating** — the human control layer. In prod tier, deploys, configuration changes, exec, and destructive operations wait for a human to approve them via an external approval server.
+3. **Tier-based approval gating** — the deployment control layer. In prod tier, deploys, configuration changes, exec, and destructive operations wait for a human to approve them in the approval server (human mode), or for the agent's explicit confirmation (agent mode).
 
 ### What agents CAN'T do
 
@@ -278,7 +299,7 @@ Towline uses three independent layers to ensure project isolation:
 - Operate on containers not created by their stack's compose file
 - Deploy privileged containers, host bind mounts, or host networking
 - Create containers or exec sessions, or touch networks, volumes, or images, through the raw Docker proxy
-- Execute gated prod operations without a human approving them in your approval server
+- Execute gated prod operations without a human approving them in your approval server (in human mode)
 
 ### What stays on your machine
 
