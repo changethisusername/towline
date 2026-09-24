@@ -34,11 +34,11 @@ get started.
 |------|---------|
 | `cmd/towline-mcp/` | MCP server entry point |
 | `cmd/towline/` | CLI entry point |
-| `internal/middleware/` | Stack scoping, tier gating, container ownership |
+| `internal/middleware/` | Stack scoping, tier gating (human/agent approval modes), container ownership, compose security policy, Docker path normalization |
 | `internal/towline/` | Towline-specific MCP tool handlers |
 | `internal/proxy/` | Traefik, Caddy, Cloudflare proxy backends |
-| `internal/approval/` | In-chat approval token store |
-| `internal/cli/` | CLI command implementations |
+| `internal/approval/` | Approval token store, approval webhook client, and the built-in approval server (`towline approvals serve`: webhook API, approver API, web UI, ntfy notifications) |
+| `internal/cli/` | CLI command implementations (incl. `approvals.go` for `towline approvals`, `refresh.go` for `towline refresh`, `project.go` for shared project-config helpers) |
 | `internal/mcp/` | Upstream Portainer MCP handlers (forked) |
 | `pkg/config/` | Global and project config types |
 | `pkg/portainer/` | Upstream Portainer client |

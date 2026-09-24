@@ -186,20 +186,58 @@ func TestStackScoping_AllValidatedTools(t *testing.T) {
 			mw := scoping.ForTool(tool)
 			handler := mw(passthroughHandler())
 
-			// Correct ID passes
-			result, err := handler(context.Background(), makeRequest(map[string]any{
-				"id": float64(10),
-			}))
-			require.NoError(t, err)
-			assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
-
 			// Wrong ID is rejected
-			result, err = handler(context.Background(), makeRequest(map[string]any{
+			result, err := handler(context.Background(), makeRequest(map[string]any{
 				"id": float64(99),
 			}))
 			require.NoError(t, err)
 			text := result.Content[0].(mcp.TextContent).Text
 			assert.Contains(t, text, "Operation rejected")
+
+			// Correct ID passes (checked last: a successful delete clears the scope)
+			result, err = handler(context.Background(), makeRequest(map[string]any{
+				"id": float64(10),
+			}))
+			require.NoError(t, err)
+			assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
 		})
 	}
+}
+
+func TestStackScoping_DeleteAllowsRecreate(t *testing.T) {
+	scoping := NewStackScoping("myapp")
+	scoping.SetStackID(5)
+
+	deleteHandler := scoping.ForTool("deleteLocalStack")(passthroughHandler())
+	result, err := deleteHandler(context.Background(), makeRequest(map[string]any{"id": float64(5)}))
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	_, resolved := scoping.StackID()
+	assert.False(t, resolved)
+
+	createHandler := scoping.ForTool("createLocalStack")(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("Local stack created successfully with ID: 9"), nil
+	})
+	result, err = createHandler(context.Background(), makeRequest(map[string]any{"name": "myapp"}))
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+
+	id, resolved := scoping.StackID()
+	assert.True(t, resolved)
+	assert.Equal(t, 9, id)
+}
+
+func TestStackScoping_FailedDeleteKeepsStackID(t *testing.T) {
+	scoping := NewStackScoping("myapp")
+	scoping.SetStackID(5)
+
+	handler := scoping.ForTool("deleteLocalStack")(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultError("failed to delete local stack"), nil
+	})
+	_, err := handler(context.Background(), makeRequest(map[string]any{"id": float64(5)}))
+	require.NoError(t, err)
+
+	_, resolved := scoping.StackID()
+	assert.True(t, resolved)
 }

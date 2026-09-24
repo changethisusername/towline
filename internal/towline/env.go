@@ -159,6 +159,13 @@ func (h *Handlers) HandleEnvSet() server.ToolHandlerFunc {
 			envVars = append(envVars, models.LocalStackEnvVar{Name: name, Value: value})
 		}
 
+		// Record the change in deployment history within the same update.
+		// The value is deliberately omitted: it may be a secret.
+		envVars, err = appendDeploymentEntry(envVars, fmt.Sprintf("Set environment variable %s", name), composeFile, composeFile, "deployed")
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to record deployment", err), nil
+		}
+
 		// Write back via UpdateLocalStack, preserving compose file
 		err = h.Server.Client().UpdateLocalStack(stack.ID, stack.EndpointID, composeFile, envVars, false, false)
 		if err != nil {

@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	towline "github.com/changethisusername/towline"
 	"github.com/changethisusername/towline/pkg/config"
@@ -27,6 +29,9 @@ func runInit(args []string) error {
 	}
 
 	projectName := fs.Arg(0)
+	if err := validateProjectName(projectName); err != nil {
+		return err
+	}
 
 	if *tier != "dev" && *tier != "prod" {
 		return fmt.Errorf("tier must be 'dev' or 'prod', got '%s'", *tier)
@@ -34,6 +39,13 @@ func runInit(args []string) error {
 
 	// Load global config
 	globalCfg, err := config.LoadGlobalConfig()
+	if err != nil {
+		return err
+	}
+
+	// Resolve the compose file before touching Portainer, so an unknown
+	// template fails fast without creating anything.
+	composeContent, pack, packDir, err := resolveCompose(*tmpl, projectName)
 	if err != nil {
 		return err
 	}
@@ -58,12 +70,11 @@ func runInit(args []string) error {
 	}
 
 	// Initialize Portainer API
-	api := config.NewPortainerAPI(globalCfg.PortainerURL)
-	api.Token = globalCfg.PortainerAPIKey
+	api := newAdminAPI(globalCfg)
 
 	// Provision dev tier
 	stackName := projectName + "-" + *tier
-	teamID, userID, apiToken, stackID, err := provisionTier(api, globalCfg, projectName, stackName, *tmpl)
+	teamID, userID, apiToken, stackID, err := provisionTier(api, globalCfg, stackName, composeContent)
 	if err != nil {
 		if !existingDir {
 			os.RemoveAll(projectDir)
@@ -88,51 +99,46 @@ func runInit(args []string) error {
 		}
 	}
 
-	// Resolve MCP binary path
-	mcpBinaryPath := "towline-mcp"
-	if exePath, err := os.Executable(); err == nil {
-		mcpDir := filepath.Dir(exePath)
-		candidate := filepath.Join(mcpDir, "towline-mcp")
-		if _, err := os.Stat(candidate); err == nil {
-			mcpBinaryPath = candidate
-		}
-	}
+	mcpBinaryPath := resolveMCPBinary()
 
 	// Template data for rendering
-	data := TemplateData{
-		ProjectName:   projectName,
-		StackName:     stackName,
-		Tier:          *tier,
-		PortainerURL:  globalCfg.PortainerURL,
-		EnvironmentID: globalCfg.PortainerEnvID,
-		APIToken:      apiToken,
-		MCPBinaryPath: mcpBinaryPath,
-		TeamID:        teamID,
-		UserID:        userID,
-	}
+	data := projectTemplateData(globalCfg, projectName, &config.ProjectConfig{
+		StackName: stackName,
+		Tier:      *tier,
+		TeamID:    teamID,
+		UserID:    userID,
+	}, apiToken, mcpBinaryPath)
 
 	// Render templates
 	fmt.Print("Generating project files... ")
 
 	// Write MCP configs: .mcp.json is the primary config (Claude Code reads this)
 	// Also write Cursor and Gemini configs for multi-agent support
-	templates := []struct {
+	type projectTemplate struct {
 		name   string
 		output string
-	}{
-		{"mcp-json.tmpl", filepath.Join(projectDir, ".mcp.json")},
-		{"claude-settings.tmpl", filepath.Join(projectDir, ".claude", "settings.json")},
-		{"cursor-mcp.tmpl", filepath.Join(projectDir, ".cursor", "mcp.json")},
-		{"gemini-settings.tmpl", filepath.Join(projectDir, ".gemini", "settings.json")},
+		perm   os.FileMode
 	}
-	if !existingDir {
-		templates = append(templates,
-			struct{ name, output string }{"gitignore.tmpl", filepath.Join(projectDir, ".gitignore")},
-		)
+	templates := []projectTemplate{
+		{"mcp-json.tmpl", filepath.Join(projectDir, ".mcp.json"), secretFileMode},
+		{"claude-settings.tmpl", filepath.Join(projectDir, ".claude", "settings.json"), secretFileMode},
+		{"cursor-mcp.tmpl", filepath.Join(projectDir, ".cursor", "mcp.json"), secretFileMode},
+		{"gemini-settings.tmpl", filepath.Join(projectDir, ".gemini", "settings.json"), secretFileMode},
+	}
+
+	// Keep token-bearing files out of git before any of them is written.
+	// Existing codebases keep their .gitignore, with our entries appended.
+	if existingDir {
+		if err := ensureGitignore(projectDir); err != nil {
+			cleanupPortainer()
+			return fmt.Errorf("failed to update .gitignore: %w", err)
+		}
+	} else {
+		templates = append([]projectTemplate{{"gitignore.tmpl", filepath.Join(projectDir, ".gitignore"), publicFileMode}}, templates...)
 	}
 
 	for _, t := range templates {
-		if err := renderTemplate(t.name, data, t.output); err != nil {
+		if err := renderTemplate(t.name, data, t.output, t.perm); err != nil {
 			cleanupPortainer()
 			return fmt.Errorf("failed to render %s: %w", t.name, err)
 		}
@@ -178,34 +184,17 @@ func runInit(args []string) error {
 	// For new projects, write compose files and .env.example
 	// For existing dirs, only apply pack skills (skip compose and .env)
 	if !existingDir {
-		pack, packDir, packErr := loadPack(*tmpl)
-		if packErr != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), publicFileMode); err != nil {
 			cleanupPortainer()
-			return fmt.Errorf("failed to load template pack: %w", packErr)
+			return fmt.Errorf("failed to write compose: %w", err)
 		}
-
 		if pack != nil {
-			composeContent, err := readPackComposeContent(pack, packDir)
-			if err != nil {
-				cleanupPortainer()
-				return fmt.Errorf("failed to read pack compose: %w", err)
-			}
-			if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
-				cleanupPortainer()
-				return fmt.Errorf("failed to write compose: %w", err)
-			}
 			if err := applyPack(pack, packDir, projectDir); err != nil {
 				cleanupPortainer()
 				return fmt.Errorf("failed to apply pack: %w", err)
 			}
 			if len(pack.MCPs) > 0 {
 				mergePackMCPs(pack.MCPs, projectDir)
-			}
-		} else {
-			composeTemplate := "compose/" + *tmpl + ".yml"
-			if err := renderTemplate(composeTemplate, data, filepath.Join(projectDir, "docker-compose.yml")); err != nil {
-				cleanupPortainer()
-				return fmt.Errorf("failed to render compose template: %w", err)
 			}
 		}
 
@@ -214,16 +203,13 @@ func runInit(args []string) error {
 		}
 	} else {
 		// Existing dir: still apply pack skills if a pack was specified
-		if *tmpl != "default" {
-			pack, packDir, packErr := loadPack(*tmpl)
-			if packErr == nil && pack != nil {
-				if err := applyPack(pack, packDir, projectDir); err != nil {
-					cleanupPortainer()
-					return fmt.Errorf("failed to apply pack skills: %w", err)
-				}
-				if len(pack.MCPs) > 0 {
-					mergePackMCPs(pack.MCPs, projectDir)
-				}
+		if pack != nil {
+			if err := applyPack(pack, packDir, projectDir); err != nil {
+				cleanupPortainer()
+				return fmt.Errorf("failed to apply pack skills: %w", err)
+			}
+			if len(pack.MCPs) > 0 {
+				mergePackMCPs(pack.MCPs, projectDir)
 			}
 		}
 	}
@@ -273,15 +259,33 @@ func runInit(args []string) error {
 	fmt.Printf("  Tier:      %s\n", *tier)
 	fmt.Println()
 	fmt.Println("Open the project in your editor to start using the MCP tools.")
+	if *tier == "prod" {
+		fmt.Println()
+		switch {
+		case globalCfg.Approval.EffectiveMode() == config.ApprovalModeAgent:
+			fmt.Println("Prod approvals: the agent confirms its own prod operations (agent mode).")
+			fmt.Println("For human approval, run 'towline approvals setup' and then 'towline refresh " + projectName + "'.")
+		case globalCfg.Approval.URL == "":
+			fmt.Println("Warning: human approval mode has no approval server URL; prod operations that")
+			fmt.Println("need approval will be refused. Run 'towline approvals setup'.")
+		default:
+			fmt.Printf("Prod approvals go to %s. Make sure 'towline approvals serve' (or your approval server) is running.\n", globalCfg.Approval.URL)
+		}
+	}
 
 	return nil
 }
 
 // provisionTier creates Portainer resources for a project tier.
 // On partial failure, it cleans up any resources it already created.
-func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, projectName, stackName, tmpl string) (teamID, userID int, apiToken string, stackID int, err error) {
-	// Cleanup on failure: delete any resources we created if an error occurs
+func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, stackName, composeContent string) (teamID, userID int, apiToken string, stackID int, err error) {
+	adminToken := api.Token
+
+	// Cleanup on failure: delete any resources we created if an error occurs.
+	// Named results are left intact on error paths so this sees what exists.
 	defer func() {
+		// Always leave the client authenticated as admin, which cleanup needs.
+		api.Token = adminToken
 		if err == nil {
 			return
 		}
@@ -301,6 +305,7 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 				fmt.Println("OK")
 			}
 		}
+		teamID, userID, apiToken, stackID = 0, 0, "", 0
 	}()
 
 	// Create team
@@ -308,14 +313,16 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 	fmt.Printf("Creating team '%s'... ", teamName)
 	teamID, err = api.CreateTeam(teamName)
 	if err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to create team: %w", err)
+		err = fmt.Errorf("failed to create team: %w", err)
+		return
 	}
 	fmt.Println("OK")
 
 	// Grant team access to environment
 	fmt.Print("Granting environment access... ")
 	if err = api.SetEndpointTeamAccess(globalCfg.PortainerEnvID, teamID); err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to set endpoint access: %w", err)
+		err = fmt.Errorf("failed to set endpoint access: %w", err)
+		return
 	}
 	fmt.Println("OK")
 
@@ -323,61 +330,79 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, pro
 	username := "towline-" + stackName
 	password, err := generatePassword(24)
 	if err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to generate password: %w", err)
+		err = fmt.Errorf("failed to generate password: %w", err)
+		return
 	}
 
 	fmt.Printf("Creating user '%s'... ", username)
 	userID, err = api.CreateUser(username, password, 2) // role 2 = standard user
 	if err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to create user: %w", err)
+		err = fmt.Errorf("failed to create user: %w", err)
+		return
 	}
 	fmt.Println("OK")
 
 	// Add user to team
 	fmt.Print("Adding user to team... ")
 	if err = api.AddTeamMember(teamID, userID); err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to add team member: %w", err)
+		err = fmt.Errorf("failed to add team member: %w", err)
+		return
 	}
 	fmt.Println("OK")
 
 	// Generate API token for the user.
 	// Portainer requires authenticating AS the user to generate their token.
 	fmt.Print("Generating project API token... ")
-	savedToken := api.Token
 	userJWT, err := api.Authenticate(username, password)
 	if err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to authenticate as project user: %w", err)
+		err = fmt.Errorf("failed to authenticate as project user: %w", err)
+		return
 	}
 	api.Token = userJWT
 	apiToken, err = api.GenerateAPIToken(userID, "towline-"+stackName, password)
 	if err != nil {
-		api.Token = savedToken
-		return 0, 0, "", 0, fmt.Errorf("failed to generate API token: %w", err)
+		err = fmt.Errorf("failed to generate API token: %w", err)
+		return
 	}
 	fmt.Println("OK")
-
-	// Read compose template — fail fast if template doesn't exist
-	composeContent := "services: {}\n"
-	composePath := "compose/" + tmpl + ".yml"
-	if content, readErr := readTemplateContent(composePath); readErr == nil {
-		composeContent = string(content)
-	} else if tmpl != "default" {
-		api.Token = savedToken
-		return 0, 0, "", 0, fmt.Errorf("template '%s' not found: %w", tmpl, readErr)
-	}
 
 	// Create stack as the project user so they own it.
 	// Stack ownership in Portainer is tied to the creating user — if we create
 	// as admin, the project user gets 403 on update/stop/delete.
 	fmt.Printf("Creating stack '%s'... ", stackName)
 	stackID, err = api.CreateLocalStack(globalCfg.PortainerEnvID, stackName, composeContent)
-	api.Token = savedToken // restore admin token after stack creation
 	if err != nil {
-		return 0, 0, "", 0, fmt.Errorf("failed to create stack: %w", err)
+		err = fmt.Errorf("failed to create stack: %w", err)
+		return
 	}
 	fmt.Println("OK")
 
-	return teamID, userID, apiToken, stackID, nil
+	return
+}
+
+// resolveCompose returns the compose content for a template name. A template
+// pack of that name takes precedence over a plain compose template.
+func resolveCompose(tmpl, projectName string) (content string, pack *TemplatePack, packDir string, err error) {
+	pack, packDir, err = loadPack(tmpl)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("failed to load template pack: %w", err)
+	}
+	if pack != nil {
+		content, err = readPackComposeContent(pack, packDir)
+		if err != nil {
+			return "", nil, "", err
+		}
+		return content, pack, packDir, nil
+	}
+
+	content, err = renderTemplateToString("compose/"+tmpl+".yml", TemplateData{ProjectName: projectName})
+	if err != nil {
+		if tmpl == "default" {
+			return "services: {}\n", nil, "", nil
+		}
+		return "", nil, "", fmt.Errorf("template '%s' not found: %w", tmpl, err)
+	}
+	return content, nil, "", nil
 }
 
 // readTemplateContent reads a template file, checking user overrides first.
@@ -457,4 +482,56 @@ func gitInit(projectDir string) error {
 	}
 
 	return nil
+}
+
+// projectNameRegex matches valid project names. Names become part of Docker
+// Compose project names, Portainer team and user names, and directory names,
+// so they are restricted to lowercase letters, digits, '-' and '_'.
+var projectNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
+func validateProjectName(name string) error {
+	if !projectNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid project name %q: use lowercase letters, digits, '-' and '_' (starting with a letter or digit)", name)
+	}
+	return nil
+}
+
+// secretGitignoreEntries are the generated files that contain the project's
+// Portainer API token or provisioning details.
+var secretGitignoreEntries = []string{".mcp.json", ".claude/", ".cursor/", ".gemini/", "towline.json"}
+
+// ensureGitignore appends any missing secret entries to an existing
+// project's .gitignore (creating it if needed).
+func ensureGitignore(projectDir string) error {
+	path := filepath.Join(projectDir, ".gitignore")
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	present := map[string]bool{}
+	for _, line := range strings.Split(string(existing), "\n") {
+		present[strings.TrimSpace(line)] = true
+	}
+
+	var missing []string
+	for _, entry := range secretGitignoreEntries {
+		if !present[entry] && !present["/"+entry] {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	b.Write(existing)
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		b.WriteString("\n")
+	}
+	b.WriteString("\n# Towline agent configuration (contains API tokens)\n")
+	for _, entry := range missing {
+		b.WriteString(entry + "\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), publicFileMode)
 }

@@ -20,7 +20,7 @@ The fastest way:
 curl -fsSL https://towline.dev/install | sh
 ```
 
-This detects your OS and architecture, downloads the correct binaries from GitHub Releases, verifies checksums, and installs to `/usr/local/bin` (or `~/.local/bin` if you don't have sudo).
+This detects your OS and architecture, downloads the correct binaries from GitHub Releases, verifies each archive's SHA-256 against the release's `checksums.txt` before extracting it, and installs to `/usr/local/bin` (or `~/.local/bin` if you don't have sudo). The install aborts on a checksum mismatch, a missing checksum entry, a missing `checksums.txt`, or if no `sha256sum`/`shasum` tool is available.
 
 Or build from source:
 
@@ -49,9 +49,15 @@ towline setup
 It will prompt you for:
 
 1. **Portainer URL** — the full URL including port, e.g. `https://192.168.1.50:9443`
-2. **Admin username and password** — Towline authenticates once to generate a scoped admin API key. Your password is not stored.
-3. **Environment** — if you have multiple Docker environments in Portainer, select which one Towline should use for new projects.
-4. **Projects directory** — where new projects will be created (default: `~/projects`).
+2. **Self-signed certificate?** — Towline verifies Portainer's TLS certificate by default. Answer yes only if Portainer uses a self-signed cert; this stores `skip_tls_verify: true` and adds `-skip-tls-verify` to generated MCP configs.
+3. **Admin username and password** — Towline authenticates once to generate a scoped admin API key. Your password is not stored.
+4. **Environment** — if you have multiple Docker environments in Portainer, select which one Towline should use for new projects.
+5. **Projects directory** — where new projects will be created (default: `~/projects`).
+6. **Prod approval mode** — how prod-tier operations (deploys, config changes, exec) are approved:
+   - **Human** (recommended) — you approve each one in Towline's built-in approval server. Setup prints your **approver token once**; store it in your password manager and keep it away from your agents. Start the server with `towline approvals serve`.
+   - **Agent** — the agent confirms its own prod operations with an explicit second call. For autonomous/agentic setups.
+
+   Re-running `towline setup` keeps your existing approval settings. Change them any time with `towline approvals setup` (see the [User Guide](user-guide.md#choosing-an-approval-mode)).
 
 Towline saves the configuration to `~/.towline/config.yaml` with restricted file permissions (`0600`). The admin API key is used only by the CLI for provisioning — it is never passed to AI agents.
 
@@ -61,9 +67,11 @@ Towline saves the configuration to `~/.towline/config.yaml` with restricted file
 towline init my-first-app
 ```
 
+Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` — lowercase letters, digits, `-` and `_`, starting with a letter or digit.
+
 In under 60 seconds, this:
 
-1. Creates a **Portainer team** (`team-my-first-app`) with access scoped to one environment
+1. Creates a **Portainer team** (`team-my-first-app-dev`) with the "Standard user" role on one environment
 2. Creates a **service user** in that team with its own API key
 3. Creates a **Docker Compose stack** (`my-first-app-dev`) on your Portainer instance
 4. Generates **agent configuration files** for Claude Code, Cursor, and Gemini CLI
@@ -83,10 +91,13 @@ my-first-app/
 ├── .gitignore                  # Excludes secrets and agent configs
 ├── skills/
 │   └── towline-devops.md       # Operational guide for agents
-├── .claude/settings.json       # Claude Code MCP config
+├── .mcp.json                   # Claude Code MCP config
+├── .claude/settings.json       # Claude Code permissions
 ├── .cursor/mcp.json            # Cursor MCP config
 └── .gemini/settings.json       # Gemini CLI MCP config
 ```
+
+The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`.
 
 ### Using a compose template
 
@@ -97,6 +108,8 @@ towline init my-web-app --template web-app
 ```
 
 The `web-app` template sets up an Nginx app server, PostgreSQL 16, and Redis 7 with persistent storage — ready for your agent to customize.
+
+Template packs work the same way — e.g. `--template ai-stack` (Ollama + Open WebUI + PostgreSQL) or `--template n8n` — and also add stack-specific skills.
 
 ## Step 4: Start an agent session
 
@@ -160,7 +173,7 @@ When you're done with a project:
 towline destroy my-first-app
 ```
 
-This deletes the Portainer stack and team. Your local project files remain — remove them manually if you want.
+This deletes the Portainer stack, service user, and team. Before deleting, Towline checks each ID in `towline.json` against Portainer (the stack must be named `<project>-<tier>`, the user `towline-<stack>`, the team `team-<stack>`) and skips anything that doesn't match. Your local project files remain — remove them manually if you want.
 
 ## What's next
 
@@ -178,7 +191,10 @@ This gives you an app + PostgreSQL + Redis stack. Ask your agent to swap the Ngi
 towline init my-app --with-prod
 ```
 
-This creates both `my-app-dev` and `my-app-prod` stacks with separate teams and API keys. In the prod tier, destructive operations require your explicit approval in the agent chat.
+This creates both `my-app-dev` and `my-app-prod` stacks with separate teams and API keys. In the prod tier, deploys, configuration changes, exec, and destructive operations need approval, depending on the mode you chose at setup:
+
+- **Human mode**: keep `towline approvals serve` running. The agent sends the request, tells you what it wants to do, and waits. Approve it at `http://127.0.0.1:8787/ui` (log in with your approver token) or with `towline approvals approve <id>`; the agent then re-runs the call. Requests not decided within 30 minutes expire.
+- **Agent mode**: the agent gets a confirmation token on the first call and confirms by calling again with it. It's a deliberate second step, not a human gate.
 
 ### Add domain routing
 
@@ -208,6 +224,16 @@ The file at `skills/towline-devops.md` in each project is worth reading yourself
 - Common mistakes agents make and how to avoid them
 - Exit code meanings (137 = OOM, 1 = app error, 143 = graceful shutdown, etc.)
 
+## Upgrading
+
+After `towline update`, bring existing projects up to date:
+
+```bash
+towline refresh --all        # or: towline refresh my-app  (or plain `towline refresh` inside a project)
+```
+
+This updates each project's MCP configs (keeping your other MCP servers and custom flags), moves the token into an env var, applies your approval mode and compose policy, fixes file permissions and `.gitignore`, and moves the project team to the Standard user role (`--keep-role` skips that). Restart your agent sessions afterwards. Projects you don't refresh keep working as before — they just miss the new hardening. See the [User Guide](user-guide.md#upgrading) for details.
+
 ---
 
 ## Troubleshooting
@@ -224,6 +250,18 @@ Check that your Portainer URL is correct and includes the port (typically `9443`
 
 Your Portainer admin API key may have insufficient permissions. Re-run `towline setup` to generate a new key.
 
+### "failed to verify Portainer's TLS certificate"
+
+Portainer is using a certificate your machine doesn't trust. If it's self-signed, re-run `towline setup` and answer yes when asked about a self-signed certificate.
+
+### "your ~/.towline/config.yaml predates TLS verification"
+
+Configs from earlier releases have no `skip_tls_verify` key and keep skipping certificate verification, as before. Add `skip_tls_verify: false` to `~/.towline/config.yaml` to verify Portainer's certificate, or `skip_tls_verify: true` to keep skipping and silence the warning (or re-run `towline setup`, which asks). Then run `towline refresh --all`.
+
+### Agent says a compose file was rejected
+
+Towline's compose security policy blocks settings that could escape the container sandbox (privileged mode, host bind mounts, host networking, etc.). Use named volumes instead of bind mounts. If a project genuinely needs a specific host path, you (not the agent) can allow it under `compose_policy` in the project's `towline.json` and run `towline refresh`. See the [User Guide](user-guide.md#compose-security-policy) for the full list.
+
 ### Agent says "no containers found for service"
 
 The service may not be deployed yet, or the stack is empty. Check with `towline_service_health` first, then deploy using `updateLocalStack`.
@@ -236,7 +274,7 @@ Verify `towline-mcp` is on your PATH:
 which towline-mcp
 ```
 
-Check the agent config file (e.g., `.claude/settings.json`) points to the correct binary path and has the right Portainer URL and token.
+Check the agent MCP config file (e.g., `.mcp.json`) points to the correct binary path and has the right Portainer URL, and that `TOWLINE_PORTAINER_TOKEN` is set in its `env` block.
 
 ### Portainer shows the stack but the agent can't see it
 
@@ -248,21 +286,24 @@ The stack name must exactly match what was created by `towline init`. Check `tow
 
 Towline uses three independent layers to ensure project isolation:
 
-1. **Portainer team-scoped API keys** — the hard boundary. Each project's API key can only access its own team's resources. Even if everything else fails, Portainer enforces this.
+1. **Portainer team-scoped API keys** — the hard boundary. Each project's API key can only access its own team's resources. Project teams get Portainer's "Standard user" environment role, so one project's key can't manage other projects' stacks. Even if everything else fails, Portainer enforces this. Portainer's environment security settings for non-admin users (e.g. disabling bind mounts or privileged mode for regular users) also apply to project users — a good server-side backstop.
 
-2. **MCP stack-name filtering** — the agent experience layer. Filters Docker API responses to show only the project's containers. Provides clear error messages if an agent references something outside its scope.
+2. **MCP stack-name filtering** — the agent experience layer. Filters Docker API responses to show only the project's containers, rejects compose files that use privileged mode, host bind mounts, host networking and similar escapes, and limits `dockerProxy` writes to lifecycle actions on the stack's own containers. Provides clear error messages if an agent references something outside its scope.
 
-3. **Tier-based approval gating** — the human control layer. In prod tier, destructive and configuration-changing operations pause and ask for your approval before executing.
+3. **Tier-based approval gating** — the deployment control layer. In prod tier, deploys, configuration changes, exec, and destructive operations wait for a human to approve them in the approval server (human mode), or for the agent's explicit confirmation (agent mode).
 
 ### What agents CAN'T do
 
 - See or modify containers from other projects
 - Access the Portainer admin API (team management, user creation, etc.)
 - Operate on containers not created by their stack's compose file
-- Execute destructive prod operations without your explicit in-chat approval
+- Deploy privileged containers, host bind mounts, or host networking
+- Create containers or exec sessions, or touch networks, volumes, or images, through the raw Docker proxy
+- Execute gated prod operations without a human approving them in your approval server (in human mode)
 
 ### What stays on your machine
 
 - The admin API key (`~/.towline/config.yaml`) is never shared with agents
-- Agent config files (`.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are gitignored by default
+- Agent config files (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are gitignored by default, and MCP configs are written with `0600` permissions
+- The project API token is passed to `towline-mcp` via an environment variable, so it doesn't appear in the process list
 - The MCP server runs locally as a child process of the agent — no external network exposure

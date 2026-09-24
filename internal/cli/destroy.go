@@ -24,6 +24,11 @@ func runDestroy(args []string) error {
 	}
 
 	projectName := fs.Arg(0)
+	// Projects created before name validation may not match the init
+	// rules, so only reject names that could point outside the projects dir.
+	if projectName == "" || projectName == "." || projectName == ".." || strings.ContainsAny(projectName, `/\`) {
+		return fmt.Errorf("invalid project name %q", projectName)
+	}
 
 	// Load global config
 	globalCfg, err := config.LoadGlobalConfig()
@@ -37,6 +42,14 @@ func runDestroy(args []string) error {
 	projectCfg, err := config.LoadProjectConfig(projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to load project config: %w", err)
+	}
+
+	// towline.json lives in the project directory, which the project's agent
+	// can write. Its IDs are only used after checking, against Portainer,
+	// that each resource carries the name this project would have given it,
+	// so the admin key can never be pointed at another project's resources.
+	if projectCfg.StackName != projectName+"-dev" && projectCfg.StackName != projectName+"-prod" {
+		return fmt.Errorf("towline.json stack_name %q does not belong to project %q; refusing to destroy", projectCfg.StackName, projectName)
 	}
 
 	// Confirm destruction
@@ -58,36 +71,61 @@ func runDestroy(args []string) error {
 	}
 
 	// Initialize Portainer API
-	api := config.NewPortainerAPI(globalCfg.PortainerURL)
-	api.Token = globalCfg.PortainerAPIKey
+	api := newAdminAPI(globalCfg)
 
 	// Delete stack
 	if projectCfg.StackID > 0 {
 		fmt.Printf("Deleting stack '%s' (ID: %d)... ", projectCfg.StackName, projectCfg.StackID)
-		if err := api.DeleteStack(projectCfg.StackID, projectCfg.EnvID); err != nil {
+		stack, err := api.GetStack(projectCfg.StackID)
+		switch {
+		case err != nil:
 			fmt.Printf("warning: %v\n", err)
-		} else {
-			fmt.Println("OK")
+		case stack.Name != projectCfg.StackName:
+			fmt.Printf("skipped: stack %d is named %q, not %q\n", projectCfg.StackID, stack.Name, projectCfg.StackName)
+		default:
+			if err := api.DeleteStack(stack.ID, stack.EndpointID); err != nil {
+				fmt.Printf("warning: %v\n", err)
+			} else {
+				fmt.Println("OK")
+			}
 		}
 	}
 
 	// Delete service user
 	if projectCfg.UserID > 0 {
 		fmt.Printf("Deleting service user (ID: %d)... ", projectCfg.UserID)
-		if err := api.DeleteUser(projectCfg.UserID); err != nil {
+		want := "towline-" + projectCfg.StackName
+		name, err := api.GetUsername(projectCfg.UserID)
+		switch {
+		case err != nil:
 			fmt.Printf("warning: %v\n", err)
-		} else {
-			fmt.Println("OK")
+		case name != want:
+			fmt.Printf("skipped: user %d is %q, not %q\n", projectCfg.UserID, name, want)
+		default:
+			if err := api.DeleteUser(projectCfg.UserID); err != nil {
+				fmt.Printf("warning: %v\n", err)
+			} else {
+				fmt.Println("OK")
+			}
 		}
 	}
 
 	// Delete team
 	if projectCfg.TeamID > 0 {
 		fmt.Printf("Deleting team (ID: %d)... ", projectCfg.TeamID)
-		if err := api.DeleteTeam(projectCfg.TeamID); err != nil {
+		want := "team-" + projectCfg.StackName
+		name, err := api.GetTeamName(projectCfg.TeamID)
+		switch {
+		case err != nil:
 			fmt.Printf("warning: %v\n", err)
-		} else {
-			fmt.Println("OK")
+		case name != want:
+			fmt.Printf("skipped: team %d is %q, not %q\n", projectCfg.TeamID, name, want)
+		default:
+			if err := api.DeleteTeam(projectCfg.TeamID); err != nil {
+				fmt.Printf("warning: %v\n", err)
+			} else {
+				fmt.Println("OK")
+			}
 		}
 	}
 

@@ -29,6 +29,20 @@ func runSetup(args []string) error {
 		return fmt.Errorf("Portainer URL is required")
 	}
 
+	// TLS verification is on unless the user opts out for a self-signed cert
+	skipTLSVerify := false
+	if strings.HasPrefix(strings.ToLower(portainerURL), "https://") {
+		fmt.Print("Does Portainer use a self-signed certificate? Skipping verification exposes your admin credentials to network attackers. [y/N]: ")
+		answer, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		skipTLSVerify = answer == "y" || answer == "yes"
+	} else {
+		fmt.Println("Warning: Portainer URL is not HTTPS; credentials and API keys will be sent in cleartext.")
+	}
+
 	// Prompt for username
 	fmt.Print("Portainer admin username: ")
 	username, err := reader.ReadString('\n')
@@ -54,7 +68,7 @@ func runSetup(args []string) error {
 	// Authenticate
 	fmt.Println()
 	fmt.Print("Authenticating... ")
-	api := config.NewPortainerAPI(portainerURL)
+	api := config.NewPortainerAPI(portainerURL, skipTLSVerify)
 	jwt, err := api.Authenticate(username, password)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
@@ -151,6 +165,24 @@ func runSetup(args []string) error {
 		PortainerAPIKey: apiToken,
 		PortainerEnvID:  envID,
 		ProjectsDir:     projectsDir,
+		SkipTLSVerify:   &skipTLSVerify,
+	}
+
+	// Prod approvals: keep existing settings on re-run, otherwise ask.
+	var approverToken string
+	if previous, err := config.LoadGlobalConfig(); err == nil && previous.Approval.Mode != "" {
+		cfg.Approval = previous.Approval
+		fmt.Printf("\nKeeping your prod approval settings (%s mode). Change them with 'towline approvals setup'.\n", previous.Approval.Mode)
+	} else {
+		fmt.Println()
+		mode, err := promptApprovalMode(reader)
+		if err != nil {
+			return err
+		}
+		approverToken, err = configureApprovals(cfg, approvalOptions{Mode: mode})
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := config.SaveGlobalConfig(cfg); err != nil {
@@ -167,6 +199,10 @@ func runSetup(args []string) error {
 	cfgPath, _ := config.GlobalConfigPath()
 	fmt.Printf("Config saved to %s\n", cfgPath)
 	fmt.Printf("Projects directory: %s\n", projectsDir)
+	if approverToken != "" || cfg.Approval.Mode == config.ApprovalModeAgent {
+		printApprovalSummary(cfg, approverToken)
+	}
+
 	fmt.Println()
 	fmt.Println("Next step: run 'towline init <project-name>' to create a project.")
 

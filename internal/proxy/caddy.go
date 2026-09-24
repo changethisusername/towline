@@ -6,21 +6,29 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // CaddyManager manages domain routing via the Caddy admin API.
+//
+// The Caddy instance is shared between projects, so every route this manager
+// creates, lists, or removes is namespaced by stack name, and a hostname that
+// is already routed elsewhere cannot be claimed.
 type CaddyManager struct {
-	AdminURL string
-	client   *http.Client
+	AdminURL  string
+	StackName string
+	client    *http.Client
 }
 
-// NewCaddyManager creates a new CaddyManager with the given admin API URL.
-func NewCaddyManager(adminURL string) *CaddyManager {
+// NewCaddyManager creates a new CaddyManager for a stack with the given admin API URL.
+func NewCaddyManager(adminURL, stackName string) *CaddyManager {
 	return &CaddyManager{
-		AdminURL: adminURL,
-		client:   &http.Client{},
+		AdminURL:  strings.TrimRight(adminURL, "/"),
+		StackName: stackName,
+		client:    &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -47,16 +55,63 @@ type caddyUpstream struct {
 	Dial string `json:"dial"`
 }
 
-// routeID generates a consistent route ID for a service+domain combination.
-func routeID(service, domain string) string {
-	return fmt.Sprintf("towline-%s-%s", service, domain)
+// routeIDPrefix returns the prefix shared by all route IDs for a stack.
+// ':' cannot appear in stack, service, or domain names, so prefixes of
+// different stacks never overlap.
+func routeIDPrefix(stackName string) string {
+	return "towline:" + stackName + ":"
+}
+
+// routeID generates a consistent route ID for a stack+service+domain combination.
+func routeID(stackName, service, domain string) string {
+	return fmt.Sprintf("%s%s:%s", routeIDPrefix(stackName), service, domain)
+}
+
+func validateRoute(service, domain string) error {
+	if !domainRegex.MatchString(domain) {
+		return fmt.Errorf("invalid domain %q: must be a valid hostname", domain)
+	}
+	if !serviceNameRegex.MatchString(service) {
+		return fmt.Errorf("invalid service name %q: must contain only letters, digits, hyphens, and underscores", service)
+	}
+	return nil
 }
 
 // Add creates a new Caddy route via the admin API.
-// The composeContent parameter is ignored for Caddy (routes are managed via API, not compose labels).
+// The service must exist in this stack's compose file, and the domain must not
+// already be routed by another route. The compose content is returned unchanged
+// (Caddy routes are managed via API, not compose labels).
 func (m *CaddyManager) Add(composeContent, service, domain string, port int) (string, error) {
+	if err := validateRoute(service, domain); err != nil {
+		return "", err
+	}
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("invalid port %d", port)
+	}
+	if _, _, err := findServiceNode(composeContent, service); err != nil {
+		return "", err
+	}
+
+	id := routeID(m.StackName, service, domain)
+	routes, err := m.getRoutes()
+	if err != nil {
+		return "", err
+	}
+	for _, r := range routes {
+		if r.ID == id {
+			return "", fmt.Errorf("route for %s -> %s already exists", domain, service)
+		}
+		for _, match := range r.Match {
+			for _, host := range match.Host {
+				if strings.EqualFold(host, domain) {
+					return "", fmt.Errorf("domain %q is already routed by another route and cannot be claimed by stack %q", domain, m.StackName)
+				}
+			}
+		}
+	}
+
 	route := caddyRoute{
-		ID: routeID(service, domain),
+		ID: id,
 		Match: []caddyMatch{
 			{Host: []string{domain}},
 		},
@@ -75,8 +130,7 @@ func (m *CaddyManager) Add(composeContent, service, domain string, port int) (st
 		return "", fmt.Errorf("failed to marshal route: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes", m.AdminURL)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", m.routesURL(), bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -93,16 +147,17 @@ func (m *CaddyManager) Add(composeContent, service, domain string, port int) (st
 		return "", fmt.Errorf("Caddy API error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	// Return compose content unchanged — Caddy routes are managed externally
 	return composeContent, nil
 }
 
 // Remove deletes a Caddy route by its ID via the admin API.
+// Only routes belonging to this stack can be addressed.
 func (m *CaddyManager) Remove(composeContent, service, domain string) (string, error) {
-	id := routeID(service, domain)
-	url := fmt.Sprintf("%s/id/%s", m.AdminURL, id)
-
-	req, err := http.NewRequest("DELETE", url, nil)
+	if err := validateRoute(service, domain); err != nil {
+		return "", err
+	}
+	id := routeID(m.StackName, service, domain)
+	req, err := http.NewRequest("DELETE", m.AdminURL+"/id/"+url.PathEscape(id), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -121,11 +176,22 @@ func (m *CaddyManager) Remove(composeContent, service, domain string) (string, e
 	return composeContent, nil
 }
 
-// List retrieves all Caddy routes and extracts domain mappings from towline-managed routes.
+// List retrieves this stack's Caddy routes and extracts domain mappings.
 func (m *CaddyManager) List(composeContent string) ([]DomainMapping, error) {
-	url := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes", m.AdminURL)
+	routes, err := m.getRoutes()
+	if err != nil {
+		return nil, err
+	}
+	return ParseCaddyRoutes(routes, routeIDPrefix(m.StackName)), nil
+}
 
-	resp, err := m.client.Get(url)
+func (m *CaddyManager) routesURL() string {
+	return m.AdminURL + "/config/apps/http/servers/srv0/routes"
+}
+
+// getRoutes fetches all routes configured on the Caddy server.
+func (m *CaddyManager) getRoutes() ([]caddyRoute, error) {
+	resp, err := m.client.Get(m.routesURL())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Caddy routes: %w", err)
 	}
@@ -145,18 +211,17 @@ func (m *CaddyManager) List(composeContent string) ([]DomainMapping, error) {
 	if err := json.Unmarshal(body, &routes); err != nil {
 		return nil, fmt.Errorf("failed to parse routes: %w", err)
 	}
-
-	return ParseCaddyRoutes(routes), nil
+	return routes, nil
 }
 
 // ParseCaddyRoutes extracts DomainMappings from a list of Caddy routes.
+// Only routes whose ID starts with idPrefix are included.
 // Exported for testing.
-func ParseCaddyRoutes(routes []caddyRoute) []DomainMapping {
+func ParseCaddyRoutes(routes []caddyRoute, idPrefix string) []DomainMapping {
 	var mappings []DomainMapping
 
 	for _, route := range routes {
-		// Only process towline-managed routes
-		if !strings.HasPrefix(route.ID, "towline-") {
+		if !strings.HasPrefix(route.ID, idPrefix) {
 			continue
 		}
 

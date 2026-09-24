@@ -44,6 +44,14 @@ func (s *StackScoping) SetStackID(id int) {
 	s.resolved = true
 }
 
+// ClearStackID marks the stack as not yet created, e.g. after it is deleted.
+func (s *StackScoping) ClearStackID() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stackID = 0
+	s.resolved = false
+}
+
 // StackID returns the resolved stack ID and whether it has been resolved.
 func (s *StackScoping) StackID() (int, bool) {
 	s.mu.RLock()
@@ -116,7 +124,12 @@ func (s *StackScoping) validateStackID(ctx context.Context, request mcp.CallTool
 		return mcp.NewToolResultError(fmt.Sprintf("Operation rejected: stack ID %d does not match scoped stack '%s' (ID %d)", reqID, s.stackName, id)), nil
 	}
 
-	return next(ctx, request)
+	result, err := next(ctx, request)
+	if toolName == "deleteLocalStack" && err == nil && result != nil && !result.IsError {
+		// The stack is gone; allow it to be recreated.
+		s.ClearStackID()
+	}
+	return result, err
 }
 
 func (s *StackScoping) handleCreate(ctx context.Context, request mcp.CallToolRequest, next server.ToolHandlerFunc) (*mcp.CallToolResult, error) {

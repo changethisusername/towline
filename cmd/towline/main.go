@@ -66,6 +66,13 @@ Commands:
   update         Update towline to the latest release from GitHub
                  Flags: --check  Only check for updates, don't install
                         --force  Force update even if already on latest
+  refresh        Bring existing projects up to date with this release
+                 (MCP configs, permissions, .gitignore, team role, compose policy)
+                 Usage: towline refresh [--all | <name>...]  [--keep-role]
+  approvals      Configure and run prod-tier approvals
+                 setup     Choose human (approval server) or agent approval
+                 serve     Run the built-in approval server (web UI at /ui)
+                 list | approve <id> | reject <id>   Decide from the terminal
   help           Show this help message
   version        Show version information
 
@@ -80,7 +87,8 @@ What your agent gets:
   env_get, env_set, domains_list, domains_add, domains_remove,
   scale, deployments, exec — plus Portainer stack CRUD and Docker proxy.
 
-  Dev tier: full agent autonomy. Prod tier: mutations need approval.
+  Dev tier: full agent autonomy. Prod tier: mutations need approval, from a
+  human via 'towline approvals serve', or from the agent itself in agent mode.
 
 Docs: https://towline.dev/agentdocs
 Code: https://github.com/changethisusername/towline

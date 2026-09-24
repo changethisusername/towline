@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/changethisusername/towline/internal/approval"
@@ -20,6 +21,12 @@ import (
 const (
 	defaultToolsPath        = "tools.yaml"
 	defaultTowlineToolsPath = "towline-tools.yaml"
+
+	// tokenEnvVar supplies the Portainer API token without exposing it in
+	// the process argument list (visible to every local user via ps).
+	tokenEnvVar = "TOWLINE_PORTAINER_TOKEN"
+	// approvalAuthEnvVar supplies an optional bearer token for the approval webhook.
+	approvalAuthEnvVar = "TOWLINE_APPROVAL_WEBHOOK_TOKEN"
 )
 
 var (
@@ -37,7 +44,7 @@ func main() {
 
 	// Upstream flags
 	serverFlag := flag.String("server", "", "The Portainer server URL")
-	tokenFlag := flag.String("token", "", "The authentication token for the Portainer server")
+	tokenFlag := flag.String("token", "", "The authentication token for the Portainer server (prefer the "+tokenEnvVar+" environment variable)")
 	toolsFlag := flag.String("tools", "", "The path to the tools YAML file")
 	readOnlyFlag := flag.Bool("read-only", false, "Run in read-only mode")
 	disableVersionCheckFlag := flag.Bool("disable-version-check", true, "Disable Portainer server version check")
@@ -48,11 +55,19 @@ func main() {
 	proxyFlag := flag.String("proxy", "", "Proxy backend: traefik, caddy, or cloudflare (auto-detected if omitted)")
 	caddyAPIFlag := flag.String("caddy-api", "http://localhost:2019", "Caddy admin API URL")
 	skipTLSVerifyFlag := flag.Bool("skip-tls-verify", false, "Skip TLS certificate verification (for self-signed certs)")
+	approvalWebhookFlag := flag.String("approval-webhook", "", "Approval server URL used in human approval mode")
+	approvalModeFlag := flag.String("approval-mode", "", "Who approves prod operations: human (approval server) or agent (the agent confirms by re-calling). Default: human if -approval-webhook is set, else agent")
+	composePolicyFlag := flag.String("compose-policy", "enforce", "Compose security policy for stack create/update: enforce or off")
+	allowBindMountsFlag := flag.String("allow-bind-mounts", "", "Comma-separated host paths that stacks may bind mount (\".\" allows paths inside the stack directory)")
 
 	flag.Parse()
 
-	if *serverFlag == "" || *tokenFlag == "" {
-		log.Fatal().Msg("Both -server and -token flags are required")
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv(tokenEnvVar)
+	}
+	if *serverFlag == "" || token == "" {
+		log.Fatal().Msg("-server and a token (" + tokenEnvVar + " or -token) are required")
 	}
 	if *stackFlag == "" || *tierFlag == "" {
 		log.Fatal().Msg("Both -stack and -tier flags are required")
@@ -63,26 +78,45 @@ func main() {
 		log.Fatal().Msg("-tier must be 'dev' or 'prod'")
 	}
 
-	// Handle tools.yaml files
+	approvalMode, err := middleware.ResolveApprovalMode(*approvalModeFlag, *approvalWebhookFlag != "")
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid -approval-mode")
+	}
+
+	var composePolicy middleware.ComposePolicy
+	switch *composePolicyFlag {
+	case "enforce":
+	case "off":
+		composePolicy.Disabled = true
+		log.Warn().Msg("compose security policy is disabled for this stack")
+	default:
+		log.Fatal().Msg("-compose-policy must be 'enforce' or 'off'")
+	}
+	for _, p := range strings.Split(*allowBindMountsFlag, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			composePolicy.AllowBindMounts = append(composePolicy.AllowBindMounts, p)
+		}
+	}
+
+	// Handle tools.yaml files. Files written by an older version are
+	// upgraded in place (with a .bak copy) so projects pick up new tool
+	// definitions without manual steps.
 	toolsPath := *toolsFlag
 	if toolsPath == "" {
 		toolsPath = defaultToolsPath
 	}
-	exists, err := tooldef.CreateToolsFileIfNotExists(toolsPath)
+	status, err := tooldef.EnsureToolsFile(toolsPath, tooldef.ToolsFile)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create tools.yaml file")
+		log.Fatal().Err(err).Msg("failed to prepare tools.yaml file")
 	}
-	if exists {
-		log.Info().Msg("using existing tools.yaml file")
-	} else {
-		log.Info().Msg("created tools.yaml file")
-	}
+	log.Info().Str("path", toolsPath).Msg("tools file " + status)
 
 	towlineToolsPath := defaultTowlineToolsPath
-	_, err = tooldef.CreateTowlineToolsFileIfNotExists(towlineToolsPath)
+	status, err = tooldef.EnsureToolsFile(towlineToolsPath, tooldef.TowlineToolsFile)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create towline-tools.yaml file")
+		log.Fatal().Err(err).Msg("failed to prepare towline-tools.yaml file")
 	}
+	log.Info().Str("path", towlineToolsPath).Msg("tools file " + status)
 
 	log.Info().
 		Str("portainer-host", *serverFlag).
@@ -92,7 +126,7 @@ func main() {
 
 	// Create the upstream server
 	srv, err := mcp.NewPortainerMCPServer(
-		*serverFlag, *tokenFlag, toolsPath,
+		*serverFlag, token, toolsPath,
 		mcp.WithReadOnly(*readOnlyFlag),
 		mcp.WithDisableVersionCheck(*disableVersionCheckFlag),
 		mcp.WithSkipTLSVerify(*skipTLSVerifyFlag),
@@ -110,6 +144,20 @@ func main() {
 
 	// Create middleware instances
 	approvalStore := approval.NewStore()
+	gate := &middleware.ApprovalGate{Mode: approvalMode, Store: approvalStore, Project: *stackFlag}
+	if approvalMode == middleware.ApprovalHuman {
+		if *approvalWebhookFlag != "" {
+			webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
+			if err != nil {
+				log.Fatal().Err(err).Msg("invalid -approval-webhook")
+			}
+			gate.Approver = webhook
+		} else if tier == middleware.TierProd {
+			log.Warn().Msg("human approval mode without -approval-webhook: prod operations that need approval will be refused")
+		}
+	} else if tier == middleware.TierProd {
+		log.Warn().Msg("agent approval mode: the agent confirms its own prod operations (run 'towline approvals setup' for human approval)")
+	}
 	stackScoping := middleware.NewStackScoping(*stackFlag)
 
 	// Resolve stack ID at startup
@@ -129,18 +177,26 @@ func main() {
 	envID := getEnvironmentID(srv, *stackFlag)
 	ownership := middleware.NewContainerOwnership(*stackFlag, envID, proxyFn)
 
+	// Create towline handlers
+	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
+
 	// Build middleware chain for a given tool
 	wrappers := func(toolName string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 		var mws []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc
 
-		// Outermost: tier gating
-		mws = append(mws, middleware.NewTierGating(tier, approvalStore, toolName))
+		// Outermost: compose security policy, so a stack that would be
+		// rejected anyway never reaches the approval flow
+		mws = append(mws, middleware.NewComposePolicy(toolName, composePolicy))
+
+		// Tier gating
+		mws = append(mws, middleware.NewTierGating(tier, gate, toolName))
 
 		// Stack scoping
 		mws = append(mws, stackScoping.ForTool(toolName))
 
-		// Env filter: strip _TOWLINE_ prefixed env vars from create/update requests
-		mws = append(mws, middleware.NewEnvFilter(toolName))
+		// Env filter: strip agent-supplied _TOWLINE_ env vars from create/update
+		// requests, and carry the stack's own internal vars over on update
+		mws = append(mws, middleware.NewEnvFilter(toolName, handlers.PrepareStackUpdate))
 
 		// Container ownership (only for dockerProxy)
 		if toolName == "dockerProxy" {
@@ -153,9 +209,6 @@ func main() {
 	// Register upstream features with middleware wrapping
 	// We use AddToolWrapped instead of the upstream Add*Features methods
 	registerWrappedUpstreamTools(srv, wrappers)
-
-	// Create towline handlers
-	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
 
 	// Setup proxy manager (auto-detect or use flag)
 	setupProxyManager(handlers, srv, *stackFlag, *proxyFlag, *caddyAPIFlag)
@@ -237,7 +290,7 @@ func setupProxyManager(h *towline.Handlers, srv *mcp.PortainerMCPServer, stackNa
 			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
 			log.Info().Str("proxy", "traefik").Msg("proxy backend configured via flag")
 		case proxy.BackendCaddy:
-			cm := proxy.NewCaddyManager(caddyAPI)
+			cm := proxy.NewCaddyManager(caddyAPI, stackName)
 			h.ProxyManager = cm
 			h.CaddyManager = cm
 			log.Info().Str("proxy", "caddy").Str("api", caddyAPI).Msg("proxy backend configured via flag")

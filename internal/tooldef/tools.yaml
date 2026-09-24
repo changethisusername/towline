@@ -1,5 +1,5 @@
 ---
-version: v1.2
+version: v1.3
 tools:
   ## Access Groups
   ## An access group is the equivalent of an Endpoint Group in Portainer.
@@ -529,6 +529,9 @@ tools:
     description: >-
       Update an existing local stack with new compose file content and/or
       environment variables. Requires the stack ID and environment ID.
+      Compose files are checked against a security policy: privileged mode,
+      host namespaces, host bind mounts, devices, and added capabilities are
+      rejected; use named volumes for persistent data.
     parameters:
       - name: id
         description: The ID of the local stack to update
@@ -549,7 +552,8 @@ tools:
       - name: env
         description: >-
           Optional environment variables for the stack. Each variable must have
-          a 'name' and 'value' field.
+          a 'name' and 'value' field. When provided, the list replaces the
+          stack's variables; when omitted, the current variables are kept.
           Example: [{"name": "DB_HOST", "value": "localhost"}]
         type: array
         required: false
@@ -760,6 +764,9 @@ tools:
     description: Proxy Docker requests to a specific Portainer environment.
       This tool can be used with any Docker API operation as documented in the Docker Engine API specification (https://docs.docker.com/reference/api/engine/version/v1.48/).
       In read-only mode, only GET requests are allowed.
+      Requests are scoped to this stack's own containers. The only mutating requests allowed are
+      POST to a container's start, stop, restart, kill, pause, unpause, wait, resize, rename or update
+      endpoint, and DELETE of a container. Paths must not contain query strings (use queryParams).
     parameters:
       - name: environmentId
         description: The ID of the environment to proxy Docker requests to

@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/changethisusername/towline/internal/approval"
@@ -26,176 +28,290 @@ func passthroughHandler() server.ToolHandlerFunc {
 	}
 }
 
+// fakeApprover records submitted requests and returns a configurable status.
+type fakeApprover struct {
+	mu        sync.Mutex
+	submitted []approval.Request
+	status    approval.Status
+	submitErr error
+}
+
+func (f *fakeApprover) Submit(ctx context.Context, req approval.Request) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.submitted = append(f.submitted, req)
+	return nil
+}
+
+func (f *fakeApprover) Status(ctx context.Context, id string) (approval.Status, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.submitted {
+		if r.ID == id {
+			return f.status, nil
+		}
+	}
+	return "", errors.New("unknown id")
+}
+
+func newGate(t *testing.T, approver approval.Approver) *ApprovalGate {
+	store := approval.NewStore()
+	t.Cleanup(store.Stop)
+	return &ApprovalGate{Store: store, Approver: approver, Project: "myapp-prod"}
+}
+
+func resultText(r *mcp.CallToolResult) string {
+	return r.Content[0].(mcp.TextContent).Text
+}
+
+func extractToken(t *testing.T, text string) string {
+	t.Helper()
+	marker := `approvalToken: "`
+	i := strings.Index(text, marker)
+	require.GreaterOrEqual(t, i, 0, "no token in %q", text)
+	rest := text[i+len(marker):]
+	return rest[:strings.Index(rest, `"`)]
+}
+
 func TestTierGating_DevPassthrough(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	// Even a destructive tool should pass through in dev tier
-	mw := NewTierGating(TierDev, store, "deleteLocalStack")
-	handler := mw(passthroughHandler())
+	// Even a destructive tool should pass through in dev tier, with no approver.
+	handler := NewTierGating(TierDev, nil, "deleteLocalStack")(passthroughHandler())
 
 	result, err := handler(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
-	assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
+	assert.Equal(t, "executed", resultText(result))
 }
 
-func TestTierGating_ProdBlocksWithoutToken(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	mw := NewTierGating(TierProd, store, "deleteLocalStack")
-	handler := mw(passthroughHandler())
+func TestTierGating_ProdWithoutApproverFailsClosed(t *testing.T) {
+	handler := NewTierGating(TierProd, newGate(t, nil), "deleteLocalStack")(passthroughHandler())
 
 	result, err := handler(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
-
-	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "Production operation requires approval")
-	assert.Contains(t, text, "deleteLocalStack")
+	assert.True(t, result.IsError)
+	assert.Contains(t, resultText(result), "no approval webhook is configured")
 }
 
-func TestTierGating_ProdPassesWithValidToken(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
+func TestTierGating_ProdSubmitsRequest(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	handler := NewTierGating(TierProd, newGate(t, approver), "updateLocalStack")(passthroughHandler())
 
-	toolName := "createLocalStack"
-
-	// First call: get a token
-	mw := NewTierGating(TierProd, store, toolName)
-	handler := mw(passthroughHandler())
-
-	result, err := handler(context.Background(), makeRequest(nil))
-	require.NoError(t, err)
-
-	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "approvalToken")
-
-	// Extract token from response
-	// Format: ...approvalToken: "abcdef01"
-	tokenStart := strings.Index(text, `approvalToken: "`) + len(`approvalToken: "`)
-	tokenEnd := strings.Index(text[tokenStart:], `"`)
-	token := text[tokenStart : tokenStart+tokenEnd]
-
-	// Second call: use the token
-	result, err = handler(context.Background(), makeRequest(map[string]any{
-		"approvalToken": token,
+	result, err := handler(context.Background(), makeRequest(map[string]any{
+		"id":   1,
+		"file": "services: {}\n",
 	}))
 	require.NoError(t, err)
-	assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
+	text := resultText(result)
+	assert.Contains(t, text, "requires human approval")
+
+	require.Len(t, approver.submitted, 1)
+	req := approver.submitted[0]
+	assert.Equal(t, extractToken(t, text), req.ID)
+	assert.Equal(t, "myapp-prod", req.Project)
+	assert.Equal(t, "updateLocalStack", req.Action)
+	assert.Equal(t, "services: {}\n", req.StackContent)
+	assert.NotContains(t, req.Description, "services")
+}
+
+func TestTierGating_ProdTokenAloneDoesNotAuthorize(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	handler := NewTierGating(TierProd, newGate(t, approver), "deleteLocalStack")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
+
+	// Re-calling immediately with the token must not execute.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "still pending")
+
+	// Rejected: refused, and token consumed.
+	approver.status = approval.StatusRejected
+	result, err = handler(context.Background(), makeRequest(map[string]any{"approvalToken": token}))
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, resultText(result), "rejected")
+
+	approver.status = approval.StatusApproved
+	result, err = handler(context.Background(), makeRequest(map[string]any{"approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched")
+}
+
+func TestTierGating_ProdPassesWhenApproved(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusApproved}
+	handler := NewTierGating(TierProd, newGate(t, approver), "createLocalStack")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
+
+	result, err = handler(context.Background(), makeRequest(map[string]any{"approvalToken": token}))
+	require.NoError(t, err)
+	assert.Equal(t, "executed", resultText(result))
+
+	// Tokens are single use.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched")
+}
+
+func TestTierGating_ProdArgsMustMatch(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusApproved}
+	handler := NewTierGating(TierProd, newGate(t, approver), "towline_env_set")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(map[string]any{"name": "A", "value": "1"}))
+	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
+
+	result, err = handler(context.Background(), makeRequest(map[string]any{"name": "A", "value": "2", "approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched")
+}
+
+func TestTierGating_ProdSubmitFailure(t *testing.T) {
+	approver := &fakeApprover{submitErr: errors.New("connection refused")}
+	handler := NewTierGating(TierProd, newGate(t, approver), "deleteLocalStack")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, resultText(result), "failed to submit approval request")
 }
 
 func TestTierGating_ProdInvalidToken(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	mw := NewTierGating(TierProd, store, "deleteLocalStack")
-	handler := mw(passthroughHandler())
+	handler := NewTierGating(TierProd, newGate(t, &fakeApprover{}), "deleteLocalStack")(passthroughHandler())
 
 	result, err := handler(context.Background(), makeRequest(map[string]any{
 		"approvalToken": "invalid-token",
 	}))
 	require.NoError(t, err)
-
-	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "Invalid, expired, or mismatched approval token")
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched approval token")
 }
 
 func TestTierGating_ProdTokenBoundToTool(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
+	gate := newGate(t, &fakeApprover{status: approval.StatusApproved})
 
-	// Get a token for deleteLocalStack
-	deleteMW := NewTierGating(TierProd, store, "deleteLocalStack")
-	deleteHandler := deleteMW(passthroughHandler())
-
+	deleteHandler := NewTierGating(TierProd, gate, "deleteLocalStack")(passthroughHandler())
 	result, err := deleteHandler(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
 
-	text := result.Content[0].(mcp.TextContent).Text
-	tokenStart := strings.Index(text, `approvalToken: "`) + len(`approvalToken: "`)
-	tokenEnd := strings.Index(text[tokenStart:], `"`)
-	token := text[tokenStart : tokenStart+tokenEnd]
-
-	// Try to use the token on a different tool (updateLocalStack)
-	updateMW := NewTierGating(TierProd, store, "updateLocalStack")
-	updateHandler := updateMW(passthroughHandler())
-
+	updateHandler := NewTierGating(TierProd, gate, "updateLocalStack")(passthroughHandler())
 	result, err = updateHandler(context.Background(), makeRequest(map[string]any{
 		"approvalToken": token,
 	}))
 	require.NoError(t, err)
 
-	text = result.Content[0].(mcp.TextContent).Text
+	text := resultText(result)
 	assert.Contains(t, text, "was issued for")
 	assert.Contains(t, text, "deleteLocalStack")
 }
 
-func TestTierGating_ProdReadToolPassthrough(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	// Read tools should pass through even in prod
-	mw := NewTierGating(TierProd, store, "listLocalStacks")
-	handler := mw(passthroughHandler())
-
-	result, err := handler(context.Background(), makeRequest(nil))
-	require.NoError(t, err)
-	assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
+func TestTierGating_ProdNoApprovalNeeded(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{"read tool", "listLocalStacks", nil},
+		{"operational tool", "startLocalStack", nil},
+		{"docker GET", "dockerProxy", map[string]any{"method": "GET", "dockerAPIPath": "/containers/json"}},
+		{"docker restart", "dockerProxy", map[string]any{"method": "POST", "dockerAPIPath": "/containers/abc/restart"}},
+		{"docker versioned stop", "dockerProxy", map[string]any{"method": "POST", "dockerAPIPath": "/v1.43/containers/abc/stop"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// No approver: anything that needed approval would fail closed.
+			handler := NewTierGating(TierProd, newGate(t, nil), tt.tool)(passthroughHandler())
+			result, err := handler(context.Background(), makeRequest(tt.args))
+			require.NoError(t, err)
+			assert.Equal(t, "executed", resultText(result))
+		})
+	}
 }
 
-func TestTierGating_ProdOperationalPassthrough(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	mw := NewTierGating(TierProd, store, "startLocalStack")
-	handler := mw(passthroughHandler())
-
-	result, err := handler(context.Background(), makeRequest(nil))
-	require.NoError(t, err)
-	assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
-}
-
-func TestTierGating_DockerProxyGETPassthrough(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	mw := NewTierGating(TierProd, store, "dockerProxy")
-	handler := mw(passthroughHandler())
-
-	result, err := handler(context.Background(), makeRequest(map[string]any{
-		"method": "GET",
-	}))
-	require.NoError(t, err)
-	assert.Equal(t, "executed", result.Content[0].(mcp.TextContent).Text)
-}
-
-func TestTierGating_DockerProxyPOSTRequiresApproval(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
-	mw := NewTierGating(TierProd, store, "dockerProxy")
-	handler := mw(passthroughHandler())
-
-	result, err := handler(context.Background(), makeRequest(map[string]any{
-		"method": "POST",
-	}))
-	require.NoError(t, err)
-
-	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "Production operation requires approval")
+func TestTierGating_ProdDockerProxyNeedsApproval(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{"POST without path", map[string]any{"method": "POST"}},
+		{"container delete", map[string]any{"method": "DELETE", "dockerAPIPath": "/containers/abc"}},
+		{"container kill", map[string]any{"method": "POST", "dockerAPIPath": "/containers/abc/kill"}},
+		{"container create", map[string]any{"method": "POST", "dockerAPIPath": "/containers/create"}},
+		{"query string disguised as restart", map[string]any{"method": "POST", "dockerAPIPath": "/containers/create?x=/containers/a/restart"}},
+		{"reserved id restart", map[string]any{"method": "POST", "dockerAPIPath": "/containers/json/restart"}},
+		{"lowercase method", map[string]any{"method": "get", "dockerAPIPath": "/containers/json"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewTierGating(TierProd, newGate(t, nil), "dockerProxy")(passthroughHandler())
+			result, err := handler(context.Background(), makeRequest(tt.args))
+			require.NoError(t, err)
+			assert.True(t, result.IsError)
+			assert.Contains(t, resultText(result), "requires human approval")
+		})
+	}
 }
 
 func TestTierGating_UnknownToolDefaultsToConfiguration(t *testing.T) {
-	store := approval.NewStore()
-	defer store.Stop()
-
 	// Unknown tools default to CategoryConfiguration, which needs approval in prod
-	mw := NewTierGating(TierProd, store, "unknownTool")
-	handler := mw(passthroughHandler())
+	handler := NewTierGating(TierProd, newGate(t, nil), "unknownTool")(passthroughHandler())
 
 	result, err := handler(context.Background(), makeRequest(nil))
 	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "requires human approval")
+}
 
-	text := result.Content[0].(mcp.TextContent).Text
-	assert.Contains(t, text, "Production operation requires approval")
+func TestTierGating_AgentMode(t *testing.T) {
+	gate := newGate(t, nil)
+	gate.Mode = ApprovalAgent
+	handler := NewTierGating(TierProd, gate, "deleteLocalStack")(passthroughHandler())
+
+	result, err := handler(context.Background(), makeRequest(map[string]any{"id": 1}))
+	require.NoError(t, err)
+	text := resultText(result)
+	assert.Contains(t, text, "requires confirmation")
+	token := extractToken(t, text)
+
+	// Different arguments do not match the token.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 2, "approvalToken": token}))
+	require.NoError(t, err)
+	assert.Contains(t, resultText(result), "Invalid, expired, or mismatched")
+
+	// A mismatched attempt consumes the token (single use), so request again.
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 1}))
+	require.NoError(t, err)
+	token = extractToken(t, resultText(result))
+	result, err = handler(context.Background(), makeRequest(map[string]any{"id": 1, "approvalToken": token}))
+	require.NoError(t, err)
+	assert.Equal(t, "executed", resultText(result))
+}
+
+func TestResolveApprovalMode(t *testing.T) {
+	tests := []struct {
+		explicit string
+		webhook  bool
+		want     ApprovalMode
+		wantErr  bool
+	}{
+		{"", false, ApprovalAgent, false},
+		{"", true, ApprovalHuman, false},
+		{"human", false, ApprovalHuman, false},
+		{"agent", true, ApprovalAgent, false},
+		{"robot", false, "", true},
+	}
+	for _, tt := range tests {
+		got, err := ResolveApprovalMode(tt.explicit, tt.webhook)
+		if tt.wantErr {
+			assert.Error(t, err)
+			continue
+		}
+		require.NoError(t, err)
+		assert.Equal(t, tt.want, got, "%q webhook=%v", tt.explicit, tt.webhook)
+	}
 }
