@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,6 +49,55 @@ func TestRun_List(t *testing.T) {
 	err := Run([]string{"list"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "towline not configured")
+}
+
+func TestRun_HelpFlagIsNotAnError(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"setup --help", []string{"setup", "--help"}},
+		{"setup -h", []string{"setup", "-h"}},
+		{"init --help", []string{"init", "--help"}},
+		{"destroy -h", []string{"destroy", "-h"}},
+		{"refresh --help", []string{"refresh", "--help"}},
+		{"update --help", []string{"update", "--help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			assert.NoError(t, Run(tt.args))
+		})
+	}
+}
+
+func TestRun_SetupRejectsArguments(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	assert.ErrorContains(t, Run([]string{"setup", "extra"}), "no arguments")
+	assert.Error(t, Run([]string{"setup", "--bogus"}))
+}
+
+func TestAbsProjectsDir(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"tilde alone", "~", "/home/u"},
+		{"tilde path", "~/projects", "/home/u/projects"},
+		{"absolute", "/srv/projects/", "/srv/projects"},
+		{"relative", "projects", filepath.Join(cwd, "projects")},
+		{"tilde in the middle is literal", "a/~/b", filepath.Join(cwd, "a/~/b")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := absProjectsDir(tt.in, "/home/u")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestRun_AllCommandsDispatch(t *testing.T) {

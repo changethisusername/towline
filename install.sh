@@ -42,7 +42,8 @@ main() {
 
     check_path
 
-    if [ -t 0 ]; then
+    # stdin is the script itself under 'curl | sh', so check stdout instead.
+    if [ -t 1 ]; then
         echo "Run 'towline setup' to connect to your Portainer instance."
     fi
 }
