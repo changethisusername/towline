@@ -80,7 +80,7 @@ func New(cfg *Config, opts Options) (*Gateway, error) {
 		WebhookToken:      approval.NewToken(),
 		ApproverTokenHash: cfg.OwnerTokenHash,
 		NtfyURL:           cfg.NtfyURL,
-		PublicURL:         cfg.PublicURL + "/ui",
+		PublicURL:         cfg.PublicURL, // the approval server adds /ui
 	})
 	if err != nil {
 		return nil, err
@@ -159,7 +159,9 @@ func (g *Gateway) withDefenses(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
+		// same-origin, not no-referrer: with no-referrer browsers send
+		// "Origin: null" on form posts, which the origin check refuses.
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
 		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		if g.publicURL.Scheme == "https" {
@@ -209,8 +211,14 @@ func (g *Gateway) clientIP(r *http.Request) string {
 // sameOrigin checks a browser form post came from the gateway's own pages.
 func (g *Gateway) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin == "" || origin == "null" {
-		return origin == "" && r.Header.Get("Sec-Fetch-Site") != "cross-site"
+	site := r.Header.Get("Sec-Fetch-Site")
+	switch origin {
+	case "":
+		return site == "" || site == "same-origin" || site == "none"
+	case "null":
+		// Some privacy settings still null the Origin; Fetch Metadata
+		// tells us where the request came from.
+		return site == "same-origin"
 	}
 	return origin == g.cfg.PublicURL
 }

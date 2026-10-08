@@ -43,6 +43,8 @@ type Options struct {
 	ApprovalMode middleware.ApprovalMode
 	// Approver receives human approval requests (nil refuses them).
 	Approver approval.Approver
+	// ApprovalURL is the page where approvals are decided, shown to the agent.
+	ApprovalURL string
 
 	ComposePolicy middleware.ComposePolicy
 
@@ -112,7 +114,7 @@ func Build(o Options) (*Instance, error) {
 	srv.MergeTools(towlineTools)
 
 	approvalStore := approval.NewStore()
-	gate := &middleware.ApprovalGate{Mode: o.ApprovalMode, Store: approvalStore, Project: o.Stack, Approver: o.Approver}
+	gate := &middleware.ApprovalGate{Mode: o.ApprovalMode, Store: approvalStore, Project: o.Stack, Approver: o.Approver, ApprovalURL: o.ApprovalURL}
 
 	// The stack ID and environment ID are resolved at startup; while either
 	// is unknown (the stack is not created yet, or Portainer was

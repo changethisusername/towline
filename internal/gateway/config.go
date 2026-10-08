@@ -29,9 +29,11 @@ import (
 const ConfigEnvVar = "TOWLINE_GATEWAY_CONFIG"
 
 // projectNamePattern limits project names so that "<project>__<tool>" tool
-// names stay within the 64-character limit MCP clients enforce, and so the
-// "__" separator can never appear inside a project name.
-var projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+// names stay within the 64-character limit the Claude API enforces even
+// after Claude Code adds its "mcp__towline__" prefix (14 + 24 + 2 + the
+// longest tool name, 22 = 62), and so the "__" separator can never appear
+// inside a project name.
+var projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,23}$`)
 
 // Config is the gateway configuration, written by 'towline remote'.
 type Config struct {
@@ -173,7 +175,13 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("public_url must use https, got %q", u.Scheme)
 	}
-	c.PublicURL = u.Scheme + "://" + u.Host
+	// Canonical form (lowercase, no default port), which is how clients
+	// write the resource they ask for.
+	host := strings.ToLower(u.Host)
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		host = strings.ToLower(u.Hostname())
+	}
+	c.PublicURL = u.Scheme + "://" + host
 
 	if len(c.OwnerTokenHash) != 64 || strings.Trim(strings.ToLower(c.OwnerTokenHash), "0123456789abcdef") != "" {
 		return errors.New("owner_token_hash must be the hex SHA-256 of the owner token")
@@ -201,7 +209,7 @@ func (c *Config) Validate() error {
 	for i := range c.Projects {
 		p := &c.Projects[i]
 		if !projectNamePattern.MatchString(p.Name) {
-			return fmt.Errorf("project name %q must be 1-32 lowercase letters, digits or dashes", p.Name)
+			return fmt.Errorf("project name %q must be 1-24 lowercase letters, digits or dashes", p.Name)
 		}
 		if seen[p.Name] {
 			return fmt.Errorf("project %q is listed twice", p.Name)

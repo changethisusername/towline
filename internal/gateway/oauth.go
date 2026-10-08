@@ -356,7 +356,11 @@ func (g *Gateway) checkResource(resource string, conn *Connection) (string, erro
 	if resource == "" {
 		return g.resourceFor(""), nil
 	}
-	resource = strings.TrimSuffix(resource, "/")
+	resource = canonicalResource(resource)
+	// The bare origin (ChatGPT sends this) means the main endpoint.
+	if resource == g.resourceFor("") || resource == g.cfg.PublicURL {
+		return g.resourceFor(""), nil
+	}
 	if resource == g.resourceFor("") {
 		return resource, nil
 	}
@@ -368,6 +372,35 @@ func (g *Gateway) checkResource(resource string, conn *Connection) (string, erro
 		}
 	}
 	return "", errors.New("unknown resource for this client")
+}
+
+// tokenResource normalizes the resource sent to the token endpoint the
+// same way /authorize does, so it matches the grant.
+func (g *Gateway) tokenResource(resource string) string {
+	if resource == "" {
+		return ""
+	}
+	resource = canonicalResource(resource)
+	if resource == g.cfg.PublicURL {
+		return g.resourceFor("")
+	}
+	return resource
+}
+
+// canonicalResource lowercases the scheme and host, drops a default port
+// and a trailing slash.
+func canonicalResource(resource string) string {
+	resource = strings.TrimSuffix(resource, "/")
+	u, err := url.Parse(resource)
+	if err != nil || u.Host == "" {
+		return resource
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		u.Host = u.Hostname()
+	}
+	return u.String()
 }
 
 func validChallenge(c string) bool {
@@ -572,9 +605,9 @@ func (g *Gateway) handleToken(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch f.Get("grant_type") {
 	case "authorization_code":
-		pair, resource, err = g.store.redeemCode(conn, f.Get("code"), f.Get("redirect_uri"), f.Get("code_verifier"), strings.TrimSuffix(f.Get("resource"), "/"))
+		pair, resource, err = g.store.redeemCode(conn, f.Get("code"), f.Get("redirect_uri"), f.Get("code_verifier"), g.tokenResource(f.Get("resource")))
 	case "refresh_token":
-		pair, resource, err = g.store.refreshAccess(conn, f.Get("refresh_token"), strings.TrimSuffix(f.Get("resource"), "/"))
+		pair, resource, err = g.store.refreshAccess(conn, f.Get("refresh_token"), g.tokenResource(f.Get("resource")))
 	default:
 		tokenError(w, http.StatusBadRequest, "unsupported_grant_type", "use authorization_code or refresh_token")
 		return
@@ -669,10 +702,11 @@ type consentData struct {
 func (g *Gateway) renderConsent(w http.ResponseWriter, r *http.Request, req *authzRequest, conn *Connection, msg string) {
 	d := consentData{Request: req, ClientName: req.ClientName, LoggedIn: g.ui.loggedIn(r), Message: msg}
 	if u, err := url.Parse(req.RedirectURI); err == nil {
-		d.Redirect = u.Scheme + "://" + u.Host
-		if u.Host == "" {
-			d.Redirect = u.Scheme + ":"
-		}
+		d.Redirect = cspSource(u)
+		// Chrome checks form-action of the submitting page against every
+		// redirect that follows the post, so the app's callback must be
+		// allowed here, not only on the redirect response.
+		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; style-src 'unsafe-inline'; form-action 'self' %s; frame-ancestors 'none'; base-uri 'none'", cspSource(u)))
 	}
 	if conn != nil {
 		d.Projects, d.Scope = conn.Projects, string(conn.Scope)

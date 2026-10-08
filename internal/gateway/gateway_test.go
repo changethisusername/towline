@@ -44,9 +44,15 @@ func (f *fakeBuilder) build(g *Gateway, p ProjectConfig) (*BuiltProject, error) 
 			Handler: middleware.NewCallerGate(name, true)(h),
 		}
 	}
+	// Upstream marks dockerProxy read-only although it can write.
+	proxy := mk("dockerProxy")
+	proxy.Tool.Annotations.ReadOnlyHint = mcp.ToBoolPtr(true)
+	health := mk("towline_service_health")
+	health.Tool.Annotations.ReadOnlyHint = mcp.ToBoolPtr(true)
 	return &BuiltProject{Tools: map[string]server.ServerTool{
-		"towline_service_health": mk("towline_service_health"),
+		"towline_service_health": health,
 		"updateLocalStack":       mk("updateLocalStack"),
+		"dockerProxy":            proxy,
 	}}, nil
 }
 
@@ -377,9 +383,13 @@ func TestPreRegisteredOAuthFlow(t *testing.T) {
 	if out, isErr := callTool(t, c, "alpha__updateLocalStack"); isErr {
 		t.Fatalf("call with access token: %s", out)
 	}
-	// The token is bound to /mcp, not to the per-project endpoint.
-	if s := rawStatus(t, tg.url+"/p/alpha/mcp", access, nil); s != http.StatusUnauthorized {
-		t.Fatalf("token on other resource: %d", s)
+	// A token for /mcp also works on the per-project endpoints of its own
+	// projects (clients that don't send 'resource' get one), not others.
+	if s := rawStatus(t, tg.url+"/p/alpha/mcp", access, nil); s != http.StatusOK {
+		t.Fatalf("/mcp token on its project's endpoint: %d", s)
+	}
+	if s := rawStatus(t, tg.url+"/p/beta/mcp", access, nil); s != http.StatusNotFound {
+		t.Fatalf("/mcp token on another project's endpoint: %d", s)
 	}
 	// Refresh tokens are not bearer tokens.
 	if s := rawStatus(t, tg.url+"/mcp", refresh, nil); s != http.StatusUnauthorized {

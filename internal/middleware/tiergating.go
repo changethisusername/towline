@@ -52,6 +52,9 @@ type ApprovalGate struct {
 	Store    *approval.Store
 	Approver approval.Approver
 	Project  string
+	// ApprovalURL, when set, is the page where the human approves (the
+	// remote gateway), included in the message so chat apps show a link.
+	ApprovalURL string
 }
 
 // NewTierGating returns a middleware that gates tool calls based on tier.
@@ -201,6 +204,12 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		"Production operation requires human approval.\nAction: %s\nAn approval request has been sent (shown to your partner as %s). Tell your partner what this change does and wait for them to approve it. Then re-call this tool with identical arguments plus approvalToken: %q",
 		toolName, shortRequestID(pending.RequestID), token,
 	)
+	if gate.ApprovalURL != "" {
+		msg = fmt.Sprintf(
+			"This change needs your partner's approval.\nAction: %s\nAn approval request has been sent (shown as %s). Tell your partner what this change does and ask them to approve it at %s. Saying yes in the chat approves nothing. Once they have approved, re-call this tool with identical arguments plus approvalToken: %q",
+			toolName, shortRequestID(pending.RequestID), gate.ApprovalURL, token,
+		)
+	}
 	return mcp.NewToolResultText(msg), nil
 }
 

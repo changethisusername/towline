@@ -143,7 +143,7 @@ func runRemoteSetup(args []string) error {
 	all := fs.Bool("all", false, "Serve every project in the projects directory")
 	portainerURL := fs.String("portainer-url", "", "Portainer URL as seen from the gateway container (default: derived from your config)")
 	image := fs.String("image", "", "Gateway image (default: "+defaultImageRepo+" at this CLI's version)")
-	approvalPolicy := fs.String("approval", gateway.ApprovalAlways, "Changes made through the gateway need your approval: always, or prod (only prod projects)")
+	approvalPolicy := fs.String("approval", "", "Changes made through the gateway need your approval: always (default), or prod (only prod projects)")
 	ntfy := fs.String("ntfy-url", "", "Send approval notifications to this ntfy topic URL")
 	noDeploy := fs.Bool("no-deploy", false, "Only save the configuration")
 	composeDir := fs.String("compose-dir", "", "Write docker-compose.yml and .env here instead of deploying through Portainer")
@@ -196,10 +196,17 @@ func runRemoteSetup(args []string) error {
 	if *image != "" {
 		rc.Image = *image
 	}
-	if *approvalPolicy != gateway.ApprovalAlways && *approvalPolicy != gateway.ApprovalProd {
+	switch *approvalPolicy {
+	case gateway.ApprovalAlways, gateway.ApprovalProd:
+		rc.Approval = *approvalPolicy
+	case "":
+		// Re-running setup keeps the earlier choice.
+		if rc.Approval == "" {
+			rc.Approval = gateway.ApprovalAlways
+		}
+	default:
 		return fmt.Errorf("--approval must be always or prod")
 	}
-	rc.Approval = *approvalPolicy
 	if *ntfy != "" {
 		rc.NtfyURL = *ntfy
 	}
@@ -283,17 +290,25 @@ func runRemoteAddRemove(args []string, add bool) error {
 	if err != nil {
 		return err
 	}
-	dirs, err := projectDirs(cfg, names, false)
-	if err != nil {
-		return err
-	}
-	for _, d := range dirs {
-		if add {
+	if add {
+		dirs, err := projectDirs(cfg, names, false)
+		if err != nil {
+			return err
+		}
+		for _, d := range dirs {
 			if !slices.Contains(rc.Projects, d) {
 				rc.Projects = append(rc.Projects, d)
 			}
-		} else {
-			rc.Projects = slices.DeleteFunc(rc.Projects, func(p string) bool { return p == d })
+		}
+	} else {
+		// Match by directory name without reading towline.json, so a
+		// project whose directory is already gone can still be removed.
+		for _, name := range names {
+			before := len(rc.Projects)
+			rc.Projects = slices.DeleteFunc(rc.Projects, func(p string) bool { return filepath.Base(p) == name })
+			if len(rc.Projects) == before {
+				return fmt.Errorf("%s is not served by the gateway", name)
+			}
 		}
 	}
 	if len(rc.Projects) == 0 {
@@ -325,15 +340,43 @@ func runRemoteOwnerToken(args []string) error {
 		return err
 	}
 	token := approval.NewToken()
+	oldHash := rc.OwnerTokenHash
 	rc.OwnerTokenHash = approval.HashToken(token)
-	if err := saveRemoteConfig(rc); err != nil {
-		return err
+	// Deploy first: if it fails, the old token keeps working and the new
+	// one is never shown.
+	if err := deployRemote(cfg, rc, ""); err != nil {
+		rc.OwnerTokenHash = oldHash
+		return fmt.Errorf("owner token not changed: %w", err)
 	}
-	fmt.Println("New owner token (shown once; the old one stops working after the redeploy):")
+	if err := saveRemoteConfig(rc); err != nil {
+		return fmt.Errorf("the gateway now uses a new owner token, but saving ~/.towline/remote.yaml failed (run 'towline remote owner-token' again): %w", err)
+	}
+	fmt.Println()
+	fmt.Println("New owner token (shown once; the old one no longer works):")
 	fmt.Println()
 	fmt.Println("  " + token)
 	fmt.Println()
-	return deployRemote(cfg, rc, "")
+	return nil
+}
+
+// dropFromRemote removes a destroyed project from the gateway's
+// configuration, if one exists, and says how to apply it.
+func dropFromRemote(projectDir string) {
+	rc, err := loadRemoteConfig()
+	if err != nil {
+		return
+	}
+	dir := resolvePath(projectDir)
+	n := len(rc.Projects)
+	rc.Projects = slices.DeleteFunc(rc.Projects, func(p string) bool { return p == dir || p == projectDir })
+	if len(rc.Projects) == n {
+		return
+	}
+	if err := saveRemoteConfig(rc); err != nil {
+		fmt.Printf("Warning: failed to remove the project from the remote gateway config: %v\n", err)
+		return
+	}
+	fmt.Println("Removed from the remote gateway config; run 'towline remote deploy' so the gateway stops serving it.")
 }
 
 func runRemoteStatus(args []string) error {
@@ -438,7 +481,7 @@ func buildGatewayConfig(cfg *config.GlobalConfig, rc *remoteConfig) (*gateway.Co
 			return nil, fmt.Errorf("%s: stack %q does not match tier %q in towline.json", dir, pc.StackName, tier)
 		}
 		if !gateway.ValidProjectName(pc.StackName) {
-			return nil, fmt.Errorf("%s: stack name %q can't be served remotely (use 1-32 lowercase letters, digits and dashes)", dir, pc.StackName)
+			return nil, fmt.Errorf("%s: stack name %q can't be served remotely (remote tool names need 1-24 lowercase letters, digits and dashes)", dir, pc.StackName)
 		}
 		p := gateway.ProjectConfig{
 			Name:     pc.StackName,

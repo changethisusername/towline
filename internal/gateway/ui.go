@@ -138,7 +138,7 @@ func (u *ownerUI) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   u.g.publicURL.Scheme == "https",
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ownerSessionTTL.Seconds()),
 	})
 	u.g.audit.Info().Str("event", "owner_login").Str("ip", ip).Msg("")
@@ -155,7 +155,7 @@ func (u *ownerUI) handleLogout(w http.ResponseWriter, r *http.Request, _ ownerSe
 		delete(u.sessions, id)
 		u.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: ownerCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: u.g.publicURL.Scheme == "https", SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: ownerCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: u.g.publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/ui", http.StatusSeeOther)
 }
 

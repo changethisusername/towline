@@ -62,6 +62,7 @@ func buildProject(g *Gateway, p ProjectConfig) (*BuiltProject, error) {
 		CaddyAPI:            p.CaddyAPI,
 		ApprovalMode:        middleware.ApprovalHuman,
 		Approver:            g.approvals,
+		ApprovalURL:         g.cfg.PublicURL + "/ui",
 		ComposePolicy:       p.ComposePolicy.Policy(p.Stack),
 		RequireCaller:       true,
 	})
@@ -82,10 +83,13 @@ type mcpRouter struct {
 	built      map[string]*BuiltProject
 	aggregate  http.Handler
 	perProject map[string]http.Handler
+	// slowCallAfter is how long a tool call may take before it answers
+	// "still running" (tests shorten it).
+	slowCallAfter time.Duration
 }
 
 func newMCPRouter(g *Gateway, build ProjectBuilder) (*mcpRouter, error) {
-	rt := &mcpRouter{g: g, built: map[string]*BuiltProject{}, perProject: map[string]http.Handler{}}
+	rt := &mcpRouter{g: g, built: map[string]*BuiltProject{}, perProject: map[string]http.Handler{}, slowCallAfter: defaultSlowCallAfter}
 
 	agg := server.NewMCPServer("towline", Version,
 		server.WithToolCapabilities(false),
@@ -118,6 +122,12 @@ func newMCPRouter(g *Gateway, build ProjectBuilder) (*mcpRouter, error) {
 		sort.Strings(names)
 		for _, name := range names {
 			st := bp.Tools[name]
+			if !middleware.IsReadOnlyTool(name) || name == "dockerProxy" {
+				// Apps skip confirmation for read-only tools, so only tools
+				// that can never write may say so. dockerProxy's upstream
+				// definition claims read-only although it does POST/DELETE.
+				st.Tool.Annotations.ReadOnlyHint = mcp.ToBoolPtr(false)
+			}
 			single.AddTool(st.Tool, rt.guard(p.Name, name, st.Handler))
 
 			nt := st.Tool
@@ -179,6 +189,13 @@ func (rt *mcpRouter) handler(project string) http.Handler {
 		conn := (*Connection)(nil)
 		if hasToken {
 			conn = g.store.Authenticate(token, g.resourceFor(project))
+			if conn == nil && project != "" {
+				// A token for /mcp already covers every project of its
+				// connection; clients that don't send 'resource' get one
+				// even when they connect to a single project's URL. The
+				// project check below still applies.
+				conn = g.store.Authenticate(token, g.resourceFor(""))
+			}
 		}
 		if conn == nil {
 			// Only failures are limited, so bad tokens from one address can't
@@ -238,7 +255,14 @@ func (rt *mcpRouter) guard(project, toolName string, next server.ToolHandlerFunc
 		}
 		req.Params.Name = toolName
 		start := time.Now()
-		res, err := next(ctx, req)
+		res, finished, err := runDetached(ctx, req, next, rt.slowCallAfter)
+		if !finished {
+			rt.g.audit.Info().Str("event", "tool_call").Str("connection", conn.ID).Str("connection_name", conn.Name).
+				Str("project", project).Str("tool", toolName).Str("outcome", "still_running").Msg("")
+			return mcp.NewToolResultText(fmt.Sprintf("%s is still running after %s and will finish in the background. "+
+				"Don't repeat the call. Check the result with towline_deployments or towline_service_health in a minute.",
+				toolName, rt.slowCallAfter)), nil
+		}
 		ev := rt.g.audit.Info().Str("event", "tool_call").Str("connection", conn.ID).Str("connection_name", conn.Name).
 			Str("project", project).Str("tool", toolName).Dur("duration", time.Since(start))
 		if toolName == "dockerProxy" {
@@ -255,6 +279,35 @@ func (rt *mcpRouter) guard(project, toolName string, next server.ToolHandlerFunc
 			ev.Str("outcome", "ok").Msg("")
 		}
 		return res, err
+	}
+}
+
+// defaultSlowCallAfter is when a tool call answers "still running":
+// Cloudflare drops a request with no response after 100 seconds (524), and
+// a deploy that pulls images can take longer than that.
+const defaultSlowCallAfter = 80 * time.Second
+
+// runDetached runs a tool handler so that it keeps going if the client's
+// request ends, and returns finished=false if it takes longer than after.
+// The handler's context keeps the request's values (caller, connection)
+// but not its cancellation.
+func runDetached(ctx context.Context, req mcp.CallToolRequest, h server.ToolHandlerFunc, after time.Duration) (*mcp.CallToolResult, bool, error) {
+	type result struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := h(context.WithoutCancel(ctx), req)
+		done <- result{res, err}
+	}()
+	t := time.NewTimer(after)
+	defer t.Stop()
+	select {
+	case r := <-done:
+		return r.res, true, r.err
+	case <-t.C:
+		return nil, false, nil
 	}
 }
 

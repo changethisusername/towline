@@ -192,7 +192,7 @@ func TestEndToEndWithRealProjects(t *testing.T) {
 	betaArgs := map[string]any{"id": 2, "environmentId": 3, "file": newBeta}
 	out, isErr = callArgs(t, c, "beta-prod__updateLocalStack", betaArgs)
 	m := approvalTokenRe.FindStringSubmatch(out)
-	if isErr || m == nil || !strings.Contains(out, "human approval") {
+	if isErr || m == nil || !strings.Contains(out, "approval") || !strings.Contains(out, tg.url+"/ui") {
 		t.Fatalf("beta deploy should wait for approval: %s", out)
 	}
 	recs := tg.approvals.Records()

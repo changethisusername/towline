@@ -195,3 +195,34 @@ func TestRemoteSetupNeedsTunnelOrPort(t *testing.T) {
 	assert.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--no-tunnel", "--port", "8088", "--no-deploy", "shop"}))
 	assert.Error(t, runRemote([]string{"setup", "--url", "http://mcp.example.com", "--no-tunnel", "--port", "8088", "--no-deploy", "shop"}), "plain http only for localhost")
 }
+
+func TestRemoteRemoveWorksAfterProjectDirIsGone(t *testing.T) {
+	cfg := remoteTestEnv(t, "https://portainer.lan:9443")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "shop", "blog"}))
+	require.NoError(t, os.RemoveAll(filepath.Join(cfg.ProjectsDir, "blog")))
+	require.NoError(t, runRemote([]string{"remove", "--no-deploy", "blog"}))
+	rc, err := loadRemoteConfig()
+	require.NoError(t, err)
+	require.Len(t, rc.Projects, 1)
+	assert.Equal(t, "shop", filepath.Base(rc.Projects[0]))
+	assert.Error(t, runRemote([]string{"remove", "--no-deploy", "blog"}), "not served any more")
+}
+
+func TestRemoteSetupKeepsApprovalPolicy(t *testing.T) {
+	remoteTestEnv(t, "https://portainer.lan:9443")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--approval", "prod", "--no-deploy", "shop"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "blog"}))
+	rc, err := loadRemoteConfig()
+	require.NoError(t, err)
+	assert.Equal(t, gateway.ApprovalProd, rc.Approval)
+	assert.Len(t, rc.Projects, 2)
+}
+
+func TestRemoteOwnerTokenUnchangedWhenDeployFails(t *testing.T) {
+	remoteTestEnv(t, "http://127.0.0.1:1")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "shop"}))
+	before, _ := loadRemoteConfig()
+	assert.Error(t, runRemote([]string{"owner-token"}))
+	after, _ := loadRemoteConfig()
+	assert.Equal(t, before.OwnerTokenHash, after.OwnerTokenHash)
+}

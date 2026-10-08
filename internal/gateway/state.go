@@ -65,10 +65,12 @@ const pairingTTL = 10 * time.Minute
 // consent.
 const maxPendingClients = 20
 
-// DefaultRedirectURIs are the OAuth callbacks Claude.ai custom connectors use.
+// DefaultRedirectURIs are the OAuth callbacks of Claude and ChatGPT
+// connectors.
 var DefaultRedirectURIs = []string{
 	"https://claude.ai/api/mcp/auth_callback",
 	"https://claude.com/api/mcp/auth_callback",
+	"https://chatgpt.com/connector_platform_oauth_redirect",
 }
 
 // Connection is an owner-issued credential for one or more projects.

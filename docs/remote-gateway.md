@@ -23,7 +23,13 @@ You need a domain on Cloudflare (the free plan is enough).
 2. Copy the tunnel token from the install command (the long string after `--token`). You don't need to run that command.
 3. Under **Public hostnames**, add `mcp.example.com` with service type **HTTP** and URL **`gateway:8080`**.
 
-If you use Bot Fight Mode, "I'm Under Attack" or strict WAF rules, add a skip rule for `mcp.example.com` paths `/mcp`, `/p/*`, `/.well-known/*` and `/oauth/*`. Apps call these from their servers and can't solve challenges. Don't put Cloudflare Access in front of those paths for the same reason. You can put Access in front of `/ui` for an extra login factor.
+Claude and ChatGPT call `/mcp`, `/p/*`, `/.well-known/*` and `/oauth/*` from their own servers and can't solve challenges:
+
+- Turn **Bot Fight Mode** off for the zone. On the free plan, skip rules can't bypass it.
+- If you use "I'm Under Attack" or strict WAF rules, add a skip rule for those paths.
+- Don't put Cloudflare Access in front of those paths. You can put Access in front of `/ui` for an extra login factor.
+
+Cloudflare ends a request that gets no answer within 100 seconds. A tool call that takes longer, such as a deploy that pulls large images, answers "still running" after 80 seconds and finishes in the background; the app can check the result with `towline_deployments`.
 
 ## 2. Deploy the gateway
 
@@ -42,7 +48,9 @@ This:
 
 Don't use Portainer? `--compose-dir ./gateway` writes `docker-compose.yml` and a private `.env` instead; run `docker compose up -d` there.
 
-The gateway reaches Portainer at your configured `portainer_url`. A `localhost` URL is mapped to the Docker host (`host.docker.internal`). Use `--portainer-url` if Portainer is somewhere else from inside a container.
+The gateway reaches Portainer at your configured `portainer_url`. A `localhost` URL is mapped to the Docker host (`host.docker.internal`), which needs Portainer to listen on more than `127.0.0.1`. Use `--portainer-url` if containers reach Portainer by another name, for example when your machine uses a `.local`, Tailscale or Cloudflare Access hostname.
+
+Projects served remotely need a stack name of at most 24 lowercase letters, digits and dashes, so that tool names stay within the 64-character limit apps enforce.
 
 ## 3. Connect an app
 
@@ -58,14 +66,16 @@ The three ways to connect:
 | Method | For | What happens |
 |---|---|---|
 | **App sign-in** (default) | Claude, ChatGPT/Codex, any app that adds a connector by URL | Opens a 10-minute window. Add `https://mcp.example.com/mcp` as a connector in the app. The app opens a sign-in page on your gateway; check it's the app you just added and approve. |
-| **Client ID and secret** | Claude custom connector → Advanced settings | Shows a client ID and secret once. Paste them with the URL. The secret only works for signing in. |
+| **Client ID and secret** | Claude custom connector → Advanced settings, ChatGPT "User-defined OAuth client" | Shows a client ID and secret once. Paste them with the URL. The secret only works for signing in. Claude's and ChatGPT's callback URLs are allowed by default. |
 | **Header token** | Claude Code, Cursor, scripts | Shows a bearer token once, plus a ready `claude mcp add` command. |
+
+Apps that sign in with app sign-in register again each time you remove and re-add the connector, so open a new sign-in window first.
 
 **URLs.** `/mcp` serves every project of the connection, with tools named `<project>__<tool>`. `/p/<project>/mcp` serves one project with plain tool names; use it for clients that limit tool count or name length (Cursor).
 
 ## 4. Approvals
 
-When an app asks for a gated change, nothing runs yet. It shows up under **Waiting for your approval** with the full arguments and compose file. The app tells you what it wants to do and waits. After you approve or reject, tell the app; it re-calls with the same arguments, and the change runs once.
+When an app asks for a gated change, nothing runs yet. It shows up under **Waiting for your approval** with the full arguments and compose file. The app tells you what it wants to do, with a link to the page, and waits. After you approve or reject, tell the app; it re-calls with the same arguments, and the change runs once.
 
 Approval tokens are bound to the connection that asked, the tool and the exact arguments. They are single use and expire after 30 minutes. Saying "yes" in the chat approves nothing.
 
@@ -81,7 +91,9 @@ towline remote deploy          # redeploy, e.g. after 'towline rotate-keys' or e
 towline remote owner-token     # issue a new owner token (redeploys)
 ```
 
-Connections and OAuth grants live in the gateway's `gateway-data` volume and survive redeploys. Revoking a connection on the page ends its access immediately.
+Connections and OAuth grants live in the gateway's `gateway-data` volume and survive redeploys. Pending approvals, open sign-in windows and page logins don't survive a restart; the app asks again. Revoking a connection on the page ends its access immediately. Removing a project from the gateway also removes it from every connection, and adding it back later doesn't restore that access.
+
+`towline destroy` removes the project from the gateway's configuration; run `towline remote deploy` afterwards. If you deleted a project's directory first, `towline remote remove <name>` still works.
 
 ## Security notes
 
@@ -90,4 +102,4 @@ Connections and OAuth grants live in the gateway's `gateway-data` volume and sur
 - **Credentials.** Secrets are shown once and stored only as SHA-256 hashes. Every credential kind has its own prefix (`twl_ct_` header token, `twl_cs_` client secret, `twl_at_`/`twl_rt_` OAuth tokens), and each is accepted only where it belongs. Access tokens last 1 hour and are bound to the URL they were issued for. Refresh tokens last 30 days.
 - **Registration** of new apps is only open while you have a sign-in window open. A registered app gets nothing until you approve it with the owner token.
 - **The container** runs as a non-root user on a read-only filesystem with all capabilities dropped and no published port; only `cloudflared` talks to the outside.
-- **Host checks.** Requests must be addressed to your public hostname, and browser requests from other origins are refused.
+- **Host checks.** Requests must be addressed to your public hostname, and browser requests from other origins are refused. That includes MCP calls from browser-based tools such as MCP Inspector in browser mode. Use the header-token method from a non-browser client instead.

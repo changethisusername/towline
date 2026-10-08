@@ -148,6 +148,7 @@ func runDestroy(args []string) error {
 		return fmt.Errorf("%d Portainer resource(s) for '%s' were not deleted (see above); check them in Portainer", failed, projectName)
 	}
 	fmt.Printf("Portainer resources for '%s' have been destroyed.\n", projectName)
+	dropFromRemote(projectDir)
 	fmt.Printf("Local files remain at: %s\n", projectDir)
 	fmt.Println("Remove them manually if no longer needed: rm -rf " + projectDir)
 
