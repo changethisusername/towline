@@ -540,6 +540,9 @@ func deployRemote(cfg *config.GlobalConfig, rc *remoteConfig, composeDir string)
 	if err != nil {
 		return err
 	}
+	if _, hostGateway := gatewayPortainerURL(cfg, rc); hostGateway && !gc.Portainer.SkipTLSVerify && strings.HasPrefix(gc.Portainer.URL, "https://") {
+		fmt.Println("Note: the gateway reaches Portainer at " + gc.Portainer.URL + "; its TLS certificate must be valid for that name. Pass --portainer-url to use another address.")
+	}
 	for _, p := range gc.Projects {
 		if p.ComposePolicy.Mode == "off" {
 			fmt.Printf("Warning: project %s has its compose security policy turned off; remote apps can deploy privileged containers there.\n", p.Name)
