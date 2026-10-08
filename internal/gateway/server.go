@@ -68,6 +68,11 @@ func New(cfg *Config, opts Options) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A project removed from the config loses its connections for good, so
+	// adding a project with the same name later grants nothing old.
+	if err := store.DropProjectsExcept(cfg.ProjectNames()); err != nil {
+		return nil, err
+	}
 	// The approval server is used in-process only: its webhook token is
 	// random and never leaves this process, and its HTTP handler is not
 	// mounted. Humans decide in the owner UI.
@@ -285,9 +290,10 @@ func (l *rateLimiter) peek(key string, limit int, period time.Duration) bool {
 const (
 	// unauthenticated OAuth and registration requests per IP
 	limitOAuthPerIP = 60
-	// failed owner-token attempts per IP, and overall
-	limitLoginFailPerIP  = 10
-	limitLoginFailGlobal = 100
+	// failed owner-token attempts per IP
+	limitLoginFailPerIP = 10
+	// dynamic client registrations per IP (per 10 minutes)
+	limitRegisterPerIP = 5
 	// MCP requests per connection
 	limitMCPPerConnection = 600
 	// failed MCP authentications per IP

@@ -68,16 +68,15 @@ func (u *ownerUI) loggedIn(r *http.Request) bool {
 }
 
 // loginAllowed reports whether another owner-token attempt is allowed from
-// ip. The token is 256 bits, so this limits noise and lockout abuse rather
-// than guessing.
+// ip. The token is 256 bits, so this limits noise rather than guessing;
+// there is deliberately no global limit, which would let anyone lock the
+// owner out.
 func (u *ownerUI) loginAllowed(ip string) bool {
-	return u.g.limiter.peek("loginfail:"+ip, limitLoginFailPerIP, 15*time.Minute) &&
-		u.g.limiter.peek("loginfail:*", limitLoginFailGlobal, 15*time.Minute)
+	return u.g.limiter.peek("loginfail:"+ip, limitLoginFailPerIP, 15*time.Minute)
 }
 
 func (u *ownerUI) loginFailed(ip string) {
 	u.g.limiter.allow("loginfail:"+ip, limitLoginFailPerIP, 15*time.Minute)
-	u.g.limiter.allow("loginfail:*", limitLoginFailGlobal, 15*time.Minute)
 	u.g.audit.Warn().Str("event", "owner_login_failed").Str("ip", ip).Msg("")
 }
 
@@ -176,6 +175,8 @@ type dashboardData struct {
 	Pairings    []Pairing
 	Pending     []approval.Record
 	Recent      []approval.Record
+	// ConnNames maps connection ids to names, for approval requests.
+	ConnNames map[string]string
 }
 
 func (u *ownerUI) dashboard(s ownerSession, msg string) dashboardData {
@@ -184,6 +185,10 @@ func (u *ownerUI) dashboard(s ownerSession, msg string) dashboardData {
 		d.Projects = append(d.Projects, projectView{Name: p.Name, Stack: p.Stack, Tier: p.Tier, Approval: p.Approval})
 	}
 	d.Connections = u.g.store.Connections()
+	d.ConnNames = map[string]string{}
+	for _, c := range d.Connections {
+		d.ConnNames[c.ID] = c.Name
+	}
 	d.Pairings = u.g.store.Pairings()
 	for _, rec := range u.g.approvals.Records() {
 		if rec.Status == approval.StatusPending {

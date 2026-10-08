@@ -127,13 +127,22 @@ type oauthToken struct {
 	// CodeHash links tokens to the authorization code that minted them, so
 	// a replayed code revokes them.
 	CodeHash string `json:"code_hash,omitempty"`
+	// Successors are the refresh tokens that replaced this one (public
+	// clients), and Used records that this one was redeemed. Redeeming a
+	// replaced token after its successor was used means the token was
+	// copied, and revokes the whole grant.
+	Successors []string `json:"successors,omitempty"`
+	Used       bool     `json:"used,omitempty"`
 }
 
 // authCode is a pending authorization code (memory only).
 type authCode struct {
-	ConnectionID  string
-	ClientID      string
-	RedirectURI   string
+	ConnectionID string
+	ClientID     string
+	RedirectURI  string
+	// RedirectGiven records whether the authorization request named the
+	// redirect URI; only then must the token request repeat it.
+	RedirectGiven bool
 	Resource      string
 	CodeChallenge string
 	ExpiresAt     time.Time
@@ -262,6 +271,10 @@ func (s *Store) saveLocked() error {
 	}
 	if err := os.Rename(tmp.Name(), s.path); err != nil {
 		return fmt.Errorf("failed to write state: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	return nil
 }
@@ -456,6 +469,27 @@ func (s *Store) DropProject(name string) error {
 		return nil
 	}
 	return s.saveLocked()
+}
+
+// DropProjectsExcept removes every project not in keep from all
+// connections.
+func (s *Store) DropProjectsExcept(keep []string) error {
+	s.mu.Lock()
+	var gone []string
+	for _, c := range s.conns {
+		for _, p := range c.Projects {
+			if !slices.Contains(keep, p) && !slices.Contains(gone, p) {
+				gone = append(gone, p)
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, p := range gone {
+		if err := s.DropProject(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Connections lists connections, oldest first (copies).
@@ -684,7 +718,7 @@ func (s *Store) approveClient(clientID, pairingID string) (*Connection, error) {
 }
 
 // issueCode stores a new authorization code.
-func (s *Store) issueCode(c *Connection, redirectURI, resource, challenge string) (string, error) {
+func (s *Store) issueCode(c *Connection, redirectURI string, redirectGiven bool, resource, challenge string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked()
@@ -702,6 +736,7 @@ func (s *Store) issueCode(c *Connection, redirectURI, resource, challenge string
 		ConnectionID:  c.ID,
 		ClientID:      c.ClientID,
 		RedirectURI:   redirectURI,
+		RedirectGiven: redirectGiven,
 		Resource:      resource,
 		CodeChallenge: challenge,
 		ExpiresAt:     s.now().Add(authCodeTTL),
@@ -733,7 +768,7 @@ func (s *Store) redeemCode(c *Connection, code, redirectURI, verifier, resource 
 	if ac.ConnectionID != c.ID || ac.ClientID != c.ClientID {
 		return nil, "", errors.New("authorization code was issued to another client")
 	}
-	if ac.RedirectURI != redirectURI {
+	if (ac.RedirectGiven || redirectURI != "") && ac.RedirectURI != redirectURI {
 		return nil, "", errors.New("redirect_uri does not match the authorization request")
 	}
 	if resource != "" && resource != ac.Resource {
@@ -751,6 +786,9 @@ func (s *Store) redeemCode(c *Connection, code, redirectURI, verifier, resource 
 }
 
 func (s *Store) revokeCodeTokensLocked(codeHash string) {
+	if codeHash == "" {
+		return
+	}
 	for th, t := range s.access {
 		if t.CodeHash == codeHash {
 			delete(s.access, th)
@@ -778,6 +816,17 @@ func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*to
 	if resource != "" && resource != t.Resource {
 		return nil, "", errors.New("resource does not match the grant")
 	}
+	// A retry within the grace window may have produced several
+	// successors. Once any of them has been used (or is gone), the old
+	// token turning up again means it was copied.
+	for _, sh := range t.Successors {
+		if succ := s.refresh[sh]; succ == nil || succ.Used {
+			s.revokeCodeTokensLocked(t.CodeHash)
+			_ = s.saveLocked()
+			return nil, "", errors.New("refresh token was already rotated; the grant is revoked")
+		}
+	}
+	t.Used = true
 	// Public clients get a new refresh token each time (OAuth 2.1). The old
 	// one keeps working briefly, so a retried refresh doesn't log the app
 	// out.
@@ -790,6 +839,10 @@ func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*to
 	pair, err := s.issueTokensLocked(c.ID, t.Resource, t.CodeHash, rotate)
 	if err != nil {
 		return nil, "", err
+	}
+	if rotate {
+		t.Successors = append(t.Successors, hashSecret(pair.Refresh))
+		_ = s.saveLocked()
 	}
 	return pair, t.Resource, nil
 }
@@ -824,7 +877,13 @@ func (s *Store) issueTokensLocked(connID, resource, codeHash string, withRefresh
 			}
 		}
 		if r >= maxTokensPerConnection {
-			return nil, errors.New("too many active grants for this client; revoke and recreate it")
+			var oldest string
+			for h, t := range s.refresh {
+				if t.ConnectionID == connID && (oldest == "" || t.ExpiresAt.Before(s.refresh[oldest].ExpiresAt)) {
+					oldest = h
+				}
+			}
+			delete(s.refresh, oldest)
 		}
 		pair.Refresh = prefixRefreshToken + randomHex(32)
 		s.refresh[hashSecret(pair.Refresh)] = &oauthToken{ConnectionID: connID, Resource: resource, ExpiresAt: now.Add(refreshTokenTTL), CodeHash: codeHash}

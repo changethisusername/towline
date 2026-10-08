@@ -125,10 +125,18 @@ func newMCPRouter(g *Gateway, build ProjectBuilder) (*mcpRouter, error) {
 			nt.Description = fmt.Sprintf("[project %s, %s tier] %s", p.Name, p.Tier, st.Tool.Description)
 			agg.AddTool(nt, rt.guard(p.Name, name, st.Handler))
 		}
-		rt.perProject[p.Name] = server.NewStreamableHTTPServer(single, server.WithHeartbeatInterval(25*time.Second))
+		rt.perProject[p.Name] = newStreamable(single)
 	}
-	rt.aggregate = server.NewStreamableHTTPServer(agg, server.WithHeartbeatInterval(25*time.Second))
+	rt.aggregate = newStreamable(agg)
 	return rt, nil
+}
+
+// newStreamable serves an MCP server over streamable HTTP without sessions:
+// every request is authenticated on its own, nothing is kept between
+// requests (so clients can't pile up server state), and there is no GET
+// stream because the gateway never sends server-initiated messages.
+func newStreamable(s *server.MCPServer) http.Handler {
+	return server.NewStreamableHTTPServer(s, server.WithStateLess(true), server.WithDisableStreaming(true))
 }
 
 func (rt *mcpRouter) close() {
@@ -162,10 +170,6 @@ func (rt *mcpRouter) handler(project string) http.Handler {
 			return
 		}
 		ip := g.clientIP(r)
-		if !g.limiter.peek("authfail:"+ip, limitAuthFailPerIP, time.Minute) {
-			tooMany(w)
-			return
-		}
 		if project != "" && !ValidProjectName(project) {
 			http.NotFound(w, r)
 			return
@@ -177,7 +181,12 @@ func (rt *mcpRouter) handler(project string) http.Handler {
 			conn = g.store.Authenticate(token, g.resourceFor(project))
 		}
 		if conn == nil {
-			g.limiter.allow("authfail:"+ip, limitAuthFailPerIP, time.Minute)
+			// Only failures are limited, so bad tokens from one address can't
+			// lock out valid clients that share it (e.g. behind a proxy).
+			if !g.limiter.allow("authfail:"+ip, limitAuthFailPerIP, time.Minute) {
+				tooMany(w)
+				return
+			}
 			challenge := fmt.Sprintf(`Bearer resource_metadata=%q`, g.resourceMetadataURL(project))
 			if hasToken {
 				challenge += `, error="invalid_token"`

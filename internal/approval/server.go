@@ -26,6 +26,9 @@ const (
 	// maxPendingRecords caps undecided requests, so an agent holding the
 	// webhook token cannot exhaust memory or flood the approver.
 	maxPendingRecords = 100
+	// maxPendingPerClient caps one remote client's undecided requests, so
+	// it can't crowd out everyone else's.
+	maxPendingPerClient = 10
 	// recordRetention is how long decided or expired requests stay visible.
 	recordRetention = 24 * time.Hour
 	// sessionTTL bounds how long a UI login lasts.
@@ -259,6 +262,10 @@ func (s *Server) submit(req Request) error {
 		s.mu.Unlock()
 		return errTooManyPending
 	}
+	if req.Client != "" && s.pendingForClientLocked(req.Client) >= maxPendingPerClient {
+		s.mu.Unlock()
+		return errTooManyPending
+	}
 	rec := &Record{Request: req, Status: StatusPending, CreatedAt: s.now()}
 	s.records[req.ID] = rec
 	s.mu.Unlock()
@@ -350,6 +357,17 @@ func (s *Server) effectiveStatusLocked(rec *Record) Status {
 		return StatusExpired
 	}
 	return rec.Status
+}
+
+// pendingForClientLocked counts undecided requests from one remote client.
+func (s *Server) pendingForClientLocked(client string) int {
+	n := 0
+	for _, rec := range s.records {
+		if rec.Client == client && s.effectiveStatusLocked(rec) == StatusPending {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *Server) pendingCountLocked() int {

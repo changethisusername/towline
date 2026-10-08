@@ -111,7 +111,7 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 <h2>Waiting for your approval ({{len .Pending}})</h2>
 {{range .Pending}}
 <div class="card">
-<div><strong>{{.Action}}</strong> on <strong>{{.Project}}</strong>{{with .Client}} <span class="meta">by connection {{.}}</span>{{end}}</div>
+<div><strong>{{.Action}}</strong> on <strong>{{.Project}}</strong>{{with .Client}} <span class="meta">asked by {{with index $.ConnNames .}}"{{.}}"{{else}}a revoked connection{{end}}</span>{{end}}</div>
 <div class="meta">Requested {{ago .CreatedAt}} · id <code>{{short .ID}}</code></div>
 {{with .Description}}<pre>{{.}}</pre>{{end}}
 {{with .StackContent}}<details><summary>Compose file</summary><pre>{{.}}</pre></details>{{end}}

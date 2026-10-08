@@ -154,7 +154,8 @@ func pickRedirect(registered []string, requested string) (string, bool) {
 // --- Dynamic client registration ---
 
 func (g *Gateway) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !g.limiter.allow("oauth:"+g.clientIP(r), limitOAuthPerIP, time.Minute) {
+	ip := g.clientIP(r)
+	if !g.limiter.allow("oauth:"+ip, limitOAuthPerIP, time.Minute) || !g.limiter.allow("register:"+ip, limitRegisterPerIP, 10*time.Minute) {
 		tooMany(w)
 		return
 	}
@@ -256,6 +257,7 @@ type authzRequest struct {
 	ClientID      string
 	ClientName    string
 	RedirectURI   string
+	RedirectGiven bool
 	State         string
 	Resource      string
 	CodeChallenge string
@@ -297,6 +299,7 @@ func (g *Gateway) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		registered, clientName = pending.RedirectURIs, pending.ClientName
 	}
+	redirectGiven := q.Get("redirect_uri") != ""
 	redirectURI, ok := pickRedirect(registered, q.Get("redirect_uri"))
 	if !ok {
 		g.authzErrorPage(w, "The redirect URI does not match the one registered for this app.")
@@ -323,7 +326,7 @@ func (g *Gateway) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// A confidential client the owner created (or approved) can only
 	// redeem a code with its secret, so it needs no consent screen.
 	if conn != nil && !conn.Public() {
-		g.issueCodeRedirect(w, r, conn, redirectURI, resource, challenge, state)
+		g.issueCodeRedirect(w, r, conn, redirectURI, redirectGiven, resource, challenge, state)
 		return
 	}
 
@@ -332,6 +335,7 @@ func (g *Gateway) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		ClientID:      clientID,
 		ClientName:    clientName,
 		RedirectURI:   redirectURI,
+		RedirectGiven: redirectGiven,
 		State:         state,
 		Resource:      resource,
 		CodeChallenge: challenge,
@@ -492,11 +496,11 @@ func (g *Gateway) handleConsent(w http.ResponseWriter, r *http.Request) {
 		g.authzErrorPage(w, "This sign-in request expired. Start again from the app.")
 		return
 	}
-	g.issueCodeRedirect(w, r, conn, req.RedirectURI, req.Resource, req.CodeChallenge, req.State)
+	g.issueCodeRedirect(w, r, conn, req.RedirectURI, req.RedirectGiven, req.Resource, req.CodeChallenge, req.State)
 }
 
-func (g *Gateway) issueCodeRedirect(w http.ResponseWriter, r *http.Request, conn *Connection, redirectURI, resource, challenge, state string) {
-	code, err := g.store.issueCode(conn, redirectURI, resource, challenge)
+func (g *Gateway) issueCodeRedirect(w http.ResponseWriter, r *http.Request, conn *Connection, redirectURI string, redirectGiven bool, resource, challenge, state string) {
+	code, err := g.store.issueCode(conn, redirectURI, redirectGiven, resource, challenge)
 	if err != nil {
 		g.redirectError(w, r, redirectURI, state, "temporarily_unavailable", err.Error())
 		return
