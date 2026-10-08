@@ -133,8 +133,8 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 		}
 	}
 
-	if !keepRole && anchorErr == nil {
-		migrateTeamRole(cfg, api, pc)
+	if anchorErr == nil {
+		migrateTeamRole(cfg, api, pc, keepRole)
 	}
 
 	binary := resolveMCPBinary()
@@ -361,9 +361,10 @@ func appendUnique(list []string, s string) []string {
 	return append(list, s)
 }
 
-// migrateTeamRole moves a project team from Environment administrator to
-// Standard user, after checking the team is the one towline created.
-func migrateTeamRole(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) {
+// migrateTeamRole moves a project team to the Standard user role, after
+// checking the team is the one towline created, and reports the role
+// Portainer holds for it. With keepRole it only reports the current role.
+func migrateTeamRole(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig, keepRole bool) {
 	if pc.TeamID == 0 {
 		return
 	}
@@ -379,11 +380,33 @@ func migrateTeamRole(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *con
 		fmt.Printf("  warning: skipped team role update (team %d is %q, expected %q)\n", pc.TeamID, name, want)
 		return
 	}
-	if err := api.SetEndpointTeamAccess(cfg.PortainerEnvID, pc.TeamID); err != nil {
-		fmt.Printf("  warning: could not update team role: %v\n", err)
+	if keepRole {
+		role, err := api.TeamRole(cfg.PortainerEnvID, pc.TeamID)
+		if err != nil {
+			fmt.Printf("  warning: could not read the team role: %v\n", err)
+			return
+		}
+		fmt.Printf("  Team role is %s (kept)\n", role.Name)
+		warnIfCannotUpdateStacks(role)
 		return
 	}
-	fmt.Println("  Team role set to Standard user")
+	role, err := api.SetEndpointTeamAccess(cfg.PortainerEnvID, pc.TeamID)
+	if err != nil {
+		fmt.Printf("  warning: could not set the team role to %s: %v\n", config.StandardUserRoleName, err)
+		fmt.Println("  Set it by hand: Environments > the environment > Manage access > set " + want + " to " + config.StandardUserRoleName + ".")
+		return
+	}
+	fmt.Printf("  Team role set to %s\n", role.Name)
+	warnIfCannotUpdateStacks(role)
+}
+
+// warnIfCannotUpdateStacks warns when Portainer says the role can't update
+// stacks, so the agent's updateLocalStack would fail with HTTP 403.
+func warnIfCannotUpdateStacks(role config.Role) {
+	if can, known := role.CanUpdateStacks(); known && !can {
+		fmt.Printf("  warning: Portainer's %q role can't update stacks, so the agent's deploys will fail with\n", role.Name)
+		fmt.Printf("  HTTP 403. Give the team the %s role (run 'towline refresh' without --keep-role).\n", config.StandardUserRoleName)
+	}
 }
 
 // mergeMCPServer renders a template and replaces only the towline server
@@ -526,7 +549,7 @@ func warnTrackedSecrets(dir string) {
 // trackedSecrets lists the token-bearing files in dir that git tracks. It
 // returns nil when dir is not a git work tree or git is unavailable.
 func trackedSecrets(dir string) []string {
-	out, err := exec.Command("git", "-C", dir, "ls-files", "--", ".mcp.json", "towline.json", ".claude", ".cursor", ".gemini").Output()
+	out, err := exec.Command("git", append([]string{"-C", dir, "ls-files", "--"}, secretGitignoreEntries...)...).Output()
 	if err != nil {
 		return nil
 	}

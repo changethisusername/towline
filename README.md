@@ -350,7 +350,7 @@ Existing projects keep working without `refresh` (legacy `-token` flag, agent-co
 - rewrites only the `towline-<tier>` entry in `.mcp.json`, `.cursor/mcp.json` and `.gemini/settings.json` — other MCP servers, user-added flags (`-proxy`, `-caddy-api`, …) and extra env vars are kept; the token moves from `-token` to the `TOWLINE_PORTAINER_TOKEN` env var; approval mode and compose policy are applied
 - makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings
 - fixes permissions (`0600` files, `0700` dirs) and `.gitignore`, and warns if token-bearing files are tracked by git (`git rm --cached`; revoke the token if the repo was pushed)
-- moves the project team to the Standard user role, after checking the team is `team-<stack>` (`--keep-role` skips this)
+- moves the project team to the Standard user role (looked up by name), after checking the team is `team-<stack>`, then reads the role back and prints it; warns if the role can't update stacks (`--keep-role` only reports the current role)
 - on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`), its external or named volumes in `compose_policy.allow_volumes`, and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
 
 Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).

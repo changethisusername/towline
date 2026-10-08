@@ -129,10 +129,11 @@ volumes:
 	}
 	gi, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	assert.Contains(t, string(gi), ".mcp.json\n")
+	assert.True(t, strings.HasPrefix(string(gi), ".claude/\n"), "the user's own entries are kept")
 
-	// Team moved to the Standard user role.
+	// Team moved to the Standard user role, looked up by name.
 	require.Len(t, f.endpointPuts, 1)
-	assert.Contains(t, f.endpointPuts[0], `"RoleId":4`)
+	assert.Contains(t, f.endpointPuts[0], `"RoleId":3`)
 
 	// A second refresh is stable and doesn't re-grandfather.
 	before, _ := os.ReadFile(filepath.Join(dir, ".mcp.json"))
@@ -162,6 +163,24 @@ func TestRefresh_HumanApprovalConfig(t *testing.T) {
 	assert.Equal(t, gc.Approval.WebhookToken, env["TOWLINE_APPROVAL_WEBHOOK_TOKEN"])
 	assert.NotContains(t, args, "-skip-tls-verify")
 	assert.NotContains(t, args, "-allow-bind-mounts")
+}
+
+func TestRefresh_FixesReadOnlyTeamFrom040(t *testing.T) {
+	f := newFakePortainer()
+	f.teams[7] = "team-shop-prod"
+	f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
+	f.stackFiles = map[int]string{11: "services:\n  web:\n    image: nginx\n"}
+	// v0.4.0 set RoleId 4, which is Portainer's Read-only user.
+	f.teamPolicies = map[string]any{"7": map[string]any{"RoleId": 4}}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+
+	setupLegacyProject(t, srv.URL, config.GlobalConfig{})
+	require.NoError(t, runRefresh([]string{"--keep-role", "shop"}))
+	assert.Empty(t, f.endpointPuts, "--keep-role only reports the role")
+
+	require.NoError(t, runRefresh([]string{"shop"}))
+	assert.Equal(t, map[string]any{"7": map[string]any{"RoleId": float64(3)}}, f.teamPolicies)
 }
 
 func TestRefresh_TeamNameMismatchSkipsRole(t *testing.T) {

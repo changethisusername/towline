@@ -97,7 +97,7 @@ my-first-app/
 └── .gemini/settings.json       # Gemini CLI MCP config
 ```
 
-The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`. Existing `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json` and `.gemini/settings.json` files are merged (your other MCP servers and settings are kept), and `init` refuses to run if the directory already has a `towline.json` or if any of those files is tracked by git (untrack it with `git rm --cached` first).
+The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `towline.json`) to its `.gitignore`; your `.claude/`, `.cursor/` and `.gemini/` directories can stay tracked. Existing `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json` and `.gemini/settings.json` files are merged (your other MCP servers and settings are kept), and `init` refuses to run if the directory already has a `towline.json` or if any file that would hold the token is tracked by git (untrack it with `git rm --cached` first).
 
 ### Using a compose template
 
@@ -304,6 +304,6 @@ Towline uses three independent layers to ensure project isolation:
 ### What stays on your machine
 
 - The admin API key (`~/.towline/config.yaml`) is never shared with agents
-- Agent config files (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are gitignored by default, and MCP configs are written with `0600` permissions
+- Token-bearing agent config files (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `towline.json`) are gitignored by default, and MCP configs are written with `0600` permissions
 - The project API token is passed to `towline-mcp` via an environment variable, so it doesn't appear in the process list
 - The MCP server runs locally as a child process of the agent — no external network exposure

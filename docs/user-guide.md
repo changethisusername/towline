@@ -46,7 +46,7 @@ Every `towline init` creates:
 - Agent configuration files for Claude Code, Cursor, and Gemini CLI
 - The DevOps skill file that guides agent behavior
 - A git repository with an initial commit
-- A `.gitignore` that excludes token-bearing files (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`). In an existing codebase, missing entries are appended to its `.gitignore`.
+- A `.gitignore` that excludes token-bearing files (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `towline.json`). In an existing codebase, missing entries are appended to its `.gitignore`.
 
 ### Listing projects
 
@@ -656,8 +656,8 @@ For each project:
 
 - **MCP configs** — rewrites only the `towline-<tier>` entry in `.mcp.json`, `.cursor/mcp.json` and `.gemini/settings.json`. Other MCP servers (e.g. from packs), flags you added (such as `-proxy` or `-caddy-api`) and extra env vars are kept. The project token moves from the `-token` argument to the `TOWLINE_PORTAINER_TOKEN` env var, and the current approval mode and compose policy are applied.
 - **Claude Code permissions** — makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings.
-- **File hygiene** — sets token-bearing files to `0600` and their directories to `0700`, and adds missing entries to `.gitignore`. If those files are already tracked by git, it warns you: untrack them with `git rm --cached <file>`, and if the repository was ever pushed, revoke the token in Portainer.
-- **Team role** — moves the project team to Portainer's Standard user role, after checking that the team is named `team-<stack>`. Use `--keep-role` to skip this.
+- **File hygiene** — sets token-bearing files to `0600` and their directories to `0700`, and adds missing entries to `.gitignore`. Only the token files are ignored, so tracked `.claude/`, `.cursor/` and `.gemini/` directories stay tracked; the `.claude/`, `.cursor/` and `.gemini/` lines v0.4.0 appended under its "Towline agent configuration" comment are replaced with the specific files. If those files are already tracked by git, it warns you: untrack them with `git rm --cached <file>`, and if the repository was ever pushed, revoke the token in Portainer.
+- **Team role** — moves the project team to Portainer's Standard user role, after checking that the team is named `team-<stack>`. The role is looked up by name, read back from Portainer afterwards and printed, with a warning if it can't update stacks. With `--keep-role`, refresh only reports the current role.
 - **Compose policy** — on the first refresh, reads the deployed compose file and allows the bind mounts it already uses in `compose_policy.allow_bind_mounts` (absolute host paths; `"."` for relative ones), so the stack keeps deploying. Host-control paths are never allowed automatically: `/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`. External networks the deployed stack already joins are allowed in `compose_policy.allow_networks` (except `host`, `bridge` and `none`), and its external or named volumes in `compose_policy.allow_volumes`; this also runs once for projects whose `compose_policy` predates `allow_networks` or `allow_volumes`. Any remaining policy violations are printed with how to resolve them (remove them from the stack, or edit `compose_policy` yourself and refresh again).
 
 Restart your agent sessions afterwards so they load the new MCP configuration.
