@@ -120,7 +120,8 @@ call again without approvalToken to get a new one.
 - towline_env_set — Update an environment variable. Service restart may be
   needed to pick up the change. Recorded in towline_deployments (name only,
   never the value).
-  - Parameters: name (string), value (string)
+  - Parameters: name (string, letters/digits/underscore, not starting with a
+    digit; _TOWLINE_* is reserved), value (string)
   - Prod tier: requires approval
 
 - towline_domains_add — Add a domain routing to a service. Supports Traefik
@@ -128,6 +129,7 @@ call again without approvalToken to get a new one.
   Cloudflare MCP).
   - Parameters: service (string), domain (string), port (int, default 80),
     method (optional: traefik|caddy|cloudflare)
+  - Traefik: one domain per service; remove the old one first to change it.
   - Prod tier: requires approval
 
 - towline_domains_remove — Remove a domain routing.
@@ -137,10 +139,14 @@ call again without approvalToken to get a new one.
 - towline_scale — Scale a service to N replicas. Warns if the service has
   persistent volumes.
   - Parameters: service (string), replicas (whole number, 0 to 20)
+  - Refuses services whose definition or deploy block comes from a YAML
+    anchor, alias or merge key; give the service its own deploy block first.
   - Prod tier: no approval (operational)
 
 - towline_exec — Run a command inside a running container.
   - Parameters: service (string), command (string or array)
+  - Gives up after 30 seconds and returns the output so far; the command may
+    still be running.
   - Prod tier: requires approval
 
 - startLocalStack / stopLocalStack — Start or stop the entire stack.
@@ -156,12 +162,18 @@ createLocalStack and updateLocalStack reject compose files (in dev and prod)
 that use any of:
 
 - privileged, cap_add, devices
-- network_mode host or container:..., pid, ipc, uts, userns_mode, cgroup
+- privileged post_start/pre_stop hooks; device reservations other than GPUs
+- network_mode other than bridge or none; pid, ipc, uts, userns_mode, cgroup
 - security_opt with unconfined or disable
 - host bind mounts: absolute paths, ./relative, ~, or ${VAR} sources, and
   long-syntax type: bind
 - volumes_from
-- volumes with driver_opts or a non-local driver
+- volumes with driver_opts or a non-local driver, and external or explicitly
+  named volumes (a name of <stack>_<key>, compose's default, is fine)
+- external or named networks, or drivers other than bridge/overlay
+- more than one YAML document in the file
+- service names, container names or network aliases under .towline (reserved
+  for Caddy routing)
 - secrets or configs with file:
 - external_links
 - build from a local context (use a prebuilt image or a git/https context)
@@ -171,7 +183,8 @@ that use any of:
 Use named volumes (or tmpfs) for storage and towline_env_set for config. If
 a compose file is rejected, fix it — don't try to work around the policy. If
 the stack genuinely needs one of these, tell your partner: they can allow
-specific host paths for bind mounts (or turn the policy off) for this project.
+specific host paths for bind mounts, external networks or named volumes (or
+turn the policy off) for this project.
 You cannot change the policy yourself. Even with bind mounts allowed, the
 other rules still apply, and `..`, `~` and `${VAR}` sources are always
 rejected.
