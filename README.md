@@ -325,7 +325,7 @@ Configs from earlier releases have no `skip_tls_verify` key and keep skipping ce
 
 ### Per-project (`towline.json`)
 
-Created by `towline init`. Contains stack metadata and scoped credentials. The generated MCP configs (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`) pass the project token via the `TOWLINE_PORTAINER_TOKEN` env var and are written with `0600` permissions. All token-bearing files are in the generated `.gitignore`; in an existing codebase, `towline init` appends any missing entries to its `.gitignore`.
+Created by `towline init`. Contains stack metadata and scoped credentials. The generated MCP configs (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`) pass the project token via the `TOWLINE_PORTAINER_TOKEN` env var and are written with `0600` permissions. All token-bearing files are in the generated `.gitignore`; in an existing codebase, `towline init` appends any missing entries to its `.gitignore`. Existing agent configs are merged rather than replaced, and `init` refuses to run if the directory already has a `towline.json` or git tracks any token-bearing file.
 
 `towline.json` can also relax the compose security policy for one project (edited by you, not the agent):
 

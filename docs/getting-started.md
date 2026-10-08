@@ -97,7 +97,7 @@ my-first-app/
 └── .gemini/settings.json       # Gemini CLI MCP config
 ```
 
-The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`.
+The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`. Existing `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json` and `.gemini/settings.json` files are merged (your other MCP servers and settings are kept), and `init` refuses to run if the directory already has a `towline.json` or if any of those files is tracked by git (untrack it with `git rm --cached` first).
 
 ### Using a compose template
 
