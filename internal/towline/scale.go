@@ -113,6 +113,9 @@ func setServiceReplicas(composeContent, service string, replicas int) (string, s
 
 	// Navigate to or create deploy.replicas
 	deployNode := yamlMapLookup(svcNode, "deploy")
+	if err := checkScaleNotShared(root, svcNode, deployNode, service); err != nil {
+		return "", "", err
+	}
 	if deployNode == nil {
 		// Create the deploy mapping and append to service
 		deployKey := &yaml.Node{Kind: yaml.ScalarNode, Value: "deploy", Tag: "!!str"}
@@ -128,6 +131,104 @@ func setServiceReplicas(composeContent, service string, replicas int) (string, s
 	}
 
 	return string(out), warning, nil
+}
+
+// checkScaleNotShared refuses to scale a service whose deploy settings are
+// shared with, or inherited from, other YAML nodes. Editing them in place
+// would scale every service that reuses them, and adding a deploy key next
+// to a merge key would replace (not extend) the inherited deploy block and
+// drop its limits. The agent is asked to give the service its own deploy
+// block instead of having the compose file silently rewritten.
+func checkScaleNotShared(root, svcNode, deployNode *yaml.Node, service string) error {
+	if svcNode.Kind == yaml.AliasNode {
+		return fmt.Errorf("service %q is a YAML alias (*%s) of another definition; scaling it would also scale the original. Give the service its own definition, then scale", service, svcNode.Value)
+	}
+	if svcNode.Kind != yaml.MappingNode {
+		return fmt.Errorf("service %q is not a mapping", service)
+	}
+	if svcNode.Anchor != "" && yamlIsAliased(root, svcNode) {
+		return fmt.Errorf("service %q is anchored (&%s) and reused by other services; changing its deploy settings would change them too. Give the service its own deploy block outside the anchor, then scale", service, svcNode.Anchor)
+	}
+
+	if deployNode == nil {
+		if yamlMergeHasKey(svcNode, "deploy") {
+			return fmt.Errorf("service %q inherits deploy settings through a YAML merge key (<<); adding replicas would replace the inherited deploy block and drop its settings. Give the service its own deploy block, then scale", service)
+		}
+		return nil
+	}
+
+	switch {
+	case deployNode.Kind == yaml.AliasNode:
+		return fmt.Errorf("deploy of service %q is a YAML alias (*%s) shared with other services; scaling would change all of them. Give the service its own deploy block, then scale", service, deployNode.Value)
+	case deployNode.Kind != yaml.MappingNode:
+		return fmt.Errorf("deploy of service %q is not a mapping", service)
+	case deployNode.Anchor != "" && yamlIsAliased(root, deployNode):
+		return fmt.Errorf("deploy of service %q is anchored (&%s) and reused by other services; scaling would change all of them. Give the service its own deploy block, then scale", service, deployNode.Anchor)
+	}
+
+	if r := yamlMapLookup(deployNode, "replicas"); r != nil {
+		if r.Kind == yaml.AliasNode || (r.Anchor != "" && yamlIsAliased(root, r)) {
+			return fmt.Errorf("deploy.replicas of service %q is a shared YAML anchor or alias; replace it with a plain number, then scale", service)
+		}
+	}
+	return nil
+}
+
+// yamlIsAliased reports whether any alias node under n refers to target.
+func yamlIsAliased(n, target *yaml.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Kind == yaml.AliasNode && n.Alias == target {
+		return true
+	}
+	for _, c := range n.Content {
+		if yamlIsAliased(c, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// yamlMergeHasKey reports whether mapping inherits key through a merge key
+// (<<), directly or through nested merges.
+func yamlMergeHasKey(mapping *yaml.Node, key string) bool {
+	return yamlMergeHasKeyDepth(mapping, key, 0)
+}
+
+func yamlMergeHasKeyDepth(mapping *yaml.Node, key string, depth int) bool {
+	if mapping == nil || depth > 16 {
+		return false
+	}
+	if mapping.Kind == yaml.AliasNode {
+		mapping = mapping.Alias
+	}
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		k := mapping.Content[i]
+		if k.Value != "<<" && k.Tag != "!!merge" {
+			continue
+		}
+		v := mapping.Content[i+1]
+		sources := []*yaml.Node{v}
+		if v.Kind == yaml.SequenceNode {
+			sources = v.Content
+		}
+		for _, src := range sources {
+			if src.Kind == yaml.AliasNode {
+				src = src.Alias
+			}
+			if src == nil {
+				continue
+			}
+			if yamlMapLookup(src, key) != nil || yamlMergeHasKeyDepth(src, key, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // yamlMapLookup finds a key in a yaml.Node mapping and returns the value node.

@@ -43,6 +43,179 @@ func TestValidateReplicas(t *testing.T) {
 	}
 }
 
+func TestSetServiceReplicas_AnchorsAndMergeKeys(t *testing.T) {
+	tests := []struct {
+		name         string
+		compose      string
+		service      string
+		wantErr      string
+		wantContains []string
+	}{
+		{
+			name: "plain service gets deploy.replicas",
+			compose: `services:
+  web:
+    image: nginx
+`,
+			service:      "web",
+			wantContains: []string{"deploy:\n            replicas: 3"},
+		},
+		{
+			name: "deploy is an alias shared with another service",
+			compose: `x-deploy: &d
+  resources:
+    limits:
+      memory: 256m
+services:
+  web:
+    image: nginx
+    deploy: *d
+  api:
+    image: api
+    deploy: *d
+`,
+			service: "web",
+			wantErr: "YAML alias",
+		},
+		{
+			name: "deploy is anchored and reused by another service",
+			compose: `services:
+  web:
+    image: nginx
+    deploy: &d
+      replicas: 1
+  api:
+    image: api
+    deploy: *d
+`,
+			service: "web",
+			wantErr: "anchored (&d)",
+		},
+		{
+			name: "deploy inherited via merge key would be replaced",
+			compose: `x-base: &base
+  image: nginx
+  deploy:
+    resources:
+      limits:
+        memory: 256m
+services:
+  web:
+    <<: *base
+`,
+			service: "web",
+			wantErr: "merge key",
+		},
+		{
+			name: "deploy inherited via merge key list",
+			compose: `x-a: &a
+  image: nginx
+x-b: &b
+  deploy:
+    resources:
+      limits:
+        cpus: "0.5"
+services:
+  web:
+    <<: [*a, *b]
+`,
+			service: "web",
+			wantErr: "merge key",
+		},
+		{
+			name: "service anchored and merged into another service",
+			compose: `services:
+  web: &web
+    image: nginx
+  web2:
+    <<: *web
+    ports:
+      - "8080:80"
+`,
+			service: "web",
+			wantErr: "reused by other services",
+		},
+		{
+			name: "service is itself an alias",
+			compose: `x-svc: &svc
+  image: nginx
+services:
+  web: *svc
+`,
+			service: "web",
+			wantErr: "YAML alias",
+		},
+		{
+			name: "merge key without deploy is fine",
+			compose: `x-base: &base
+  image: nginx
+  restart: always
+services:
+  web:
+    <<: *base
+`,
+			service:      "web",
+			wantContains: []string{"<<: *base", "replicas: 3"},
+		},
+		{
+			name: "own deploy overriding a merged one is fine",
+			compose: `x-base: &base
+  image: nginx
+  deploy:
+    replicas: 1
+services:
+  web:
+    <<: *base
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 128m
+`,
+			service:      "web",
+			wantContains: []string{"replicas: 3", "memory: 128m"},
+		},
+		{
+			name: "anchored deploy that nobody reuses is fine",
+			compose: `services:
+  web:
+    image: nginx
+    deploy: &d
+      replicas: 1
+`,
+			service:      "web",
+			wantContains: []string{"replicas: 3"},
+		},
+		{
+			name: "replicas value is an alias",
+			compose: `x-n: &n 2
+services:
+  web:
+    image: nginx
+    deploy:
+      replicas: *n
+`,
+			service: "web",
+			wantErr: "deploy.replicas",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, _, err := setServiceReplicas(tt.compose, tt.service, 3)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			for _, s := range tt.wantContains {
+				assert.Contains(t, out, s)
+			}
+		})
+	}
+}
+
 func TestHandleScale_RejectsInvalidReplicas(t *testing.T) {
 	tests := []struct {
 		name     string
