@@ -92,7 +92,8 @@ tools:
   - name: towline_domains_add
     description: >
       Add domain routing to a service. Supports Traefik (labels), Caddy (admin API),
-      or Cloudflare Tunnels (returns instructions for Cloudflare MCP).
+      or Cloudflare Tunnels (returns instructions for Cloudflare MCP). With Traefik,
+      a service has one domain; remove it before adding another.
     parameters:
       - name: service
         description: Service name from docker-compose
