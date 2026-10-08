@@ -54,13 +54,13 @@ make fmt            # gofmt
 **towline CLI** (scaffolding tool):
 - `towline init <project>` creates: Portainer team + scoped API key + stack + `.claude/settings.json` + CLAUDE.md + compose files + git init
 - Global config lives in `~/.towline/config.yaml` (portainer_url, admin key, env ID, projects dir, `skip_tls_verify`, `approval:` block)
-- `towline refresh [--all|name...]` upgrades existing projects in place: merges the towline entry into MCP configs (keeping other servers and user flags), fixes permissions/.gitignore, moves teams to the Standard user role, and grandfathers deployed bind mounts into `towline.json` `compose_policy`
+- `towline refresh [--all|name...]` upgrades existing projects in place: merges the towline entry into MCP configs (keeping other servers and user flags), fixes permissions/.gitignore, moves teams to the Standard user role (and prints the role Portainer reports), and grandfathers deployed bind mounts into `towline.json` `compose_policy`
 - `towline approvals setup|serve|list|show|approve|reject` configures and runs prod approvals
 - Templates in `~/.towline/templates/` are interpolated with `{{PROJECT_NAME}}`, `{{STACK_NAME}}`, `{{TIER}}`
 
 ### Three-layer permissions model
 
-1. **Portainer team-scoped API keys** — the hard security boundary. Each project gets a dedicated team with the "Standard user" environment role (RoleId 4, never Environment administrator), so Portainer rejects cross-project requests even if all other layers fail. The agent holds this key and can call Portainer directly, so the MCP layers below cannot be the only line of defense.
+1. **Portainer team-scoped API keys** — the hard security boundary. Each project gets a dedicated team with the "Standard user" environment role (looked up by name from `/api/roles` and read back after it is set; never Environment administrator or Read-only user), so Portainer rejects cross-project requests even if all other layers fail. The agent holds this key and can call Portainer directly, so the MCP layers below cannot be the only line of defense.
 2. **MCP stack-name filtering** — agent experience layer. Filters Docker proxy responses by `com.docker.compose.project` label. Keeps agent context clean and provides specific error messages for out-of-scope requests.
 3. **Tier-based approval gating** — deployment control layer. Dev tier: full autonomy. Prod tier: read/operational ops are immediate; configuration/deploy/destructive/exec operations require webhook approval. Holding an approval token never authorizes anything by itself; only the approval server's decision does.
 
@@ -110,7 +110,7 @@ The project follows this roadmap:
 - **Tool design principle**: every tool answers a developer question in one call. Agents should never need raw Docker API calls for common operations.
 - **Partial compose files are dangerous**: when updating a stack via `updateLocalStack`, the COMPLETE compose file must be submitted. Portainer removes any service not included.
 - **Untrusted agent input**: treat every tool argument as attacker-controlled. Validate paths, names, and compose content before they reach Portainer, Docker, or a proxy backend, and fail closed.
-- **Secrets on disk**: generated files containing the project token (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) are written 0600 and gitignored. The CLI verifies TLS unless `skip_tls_verify` was chosen at setup.
+- **Secrets on disk**: generated files containing the project token (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `towline.json`) are written 0600 and gitignored by file, not by directory, since repos often track `.claude/`, `.cursor/` and `.gemini/`. The CLI verifies TLS unless `skip_tls_verify` was chosen at setup.
 - **`towline.json` is agent-writable**: never trust its IDs with the admin key without re-verifying names against Portainer (see `towline destroy`).
 - **Never break existing installs**: new behavior must default to the previous behavior for configs that predate it (unset `skip_tls_verify` keeps skipping; unset approval mode keeps agent confirmation), and `towline refresh` is how projects opt in. Tool definition files carry a version and are auto-upgraded by towline-mcp; bump `version` in `internal/tooldef/*.yaml` when changing them.
 

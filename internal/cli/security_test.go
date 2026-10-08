@@ -33,10 +33,26 @@ type fakePortainer struct {
 	deleteAuth []string
 	// stackReader, if set, is the only API key allowed to GET stacks
 	stackReader string
+	// roles is served by GET /api/roles; nil serves a 404.
+	roles []config.Role
+	// teamPolicies is the environment's TeamAccessPolicies.
+	teamPolicies map[string]any
+	// ignorePuts makes PUT /api/endpoints/1 succeed without saving.
+	ignorePuts bool
+}
+
+// portainerRoles are Portainer's built-in environment roles.
+var portainerRoles = []config.Role{
+	{ID: 1, Name: "Environment administrator", Authorizations: map[string]bool{"PortainerStackUpdate": true}},
+	{ID: 2, Name: "Helpdesk", Authorizations: map[string]bool{"PortainerStackInspect": true}},
+	{ID: 3, Name: "Standard user", Authorizations: map[string]bool{"PortainerStackUpdate": true}},
+	{ID: 4, Name: "Read-only user", Authorizations: map[string]bool{"PortainerStackInspect": true}},
+	{ID: 5, Name: "Operator", Authorizations: map[string]bool{"PortainerStackInspect": true}},
 }
 
 func newFakePortainer() *fakePortainer {
-	return &fakePortainer{teams: map[int]string{}, users: map[int]string{}, stacks: map[int]config.StackInfo{}}
+	return &fakePortainer{teams: map[int]string{}, users: map[int]string{}, stacks: map[int]config.StackInfo{},
+		roles: portainerRoles, teamPolicies: map[string]any{}}
 }
 
 func (f *fakePortainer) handler(t *testing.T) http.HandlerFunc {
@@ -61,11 +77,22 @@ func (f *fakePortainer) handler(t *testing.T) http.HandlerFunc {
 		case key == "POST /api/teams":
 			f.teams[7] = "created"
 			writeJSON(map[string]any{"Id": 7})
+		case key == "GET /api/roles":
+			if f.roles == nil {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(f.roles)
 		case key == "GET /api/endpoints/1":
-			writeJSON(map[string]any{"Id": 1, "TeamAccessPolicies": map[string]any{}})
+			writeJSON(map[string]any{"Id": 1, "TeamAccessPolicies": f.teamPolicies})
 		case key == "PUT /api/endpoints/1":
 			body, _ := io.ReadAll(r.Body)
 			f.endpointPuts = append(f.endpointPuts, string(body))
+			var update struct{ TeamAccessPolicies map[string]any }
+			_ = json.Unmarshal(body, &update)
+			if !f.ignorePuts {
+				f.teamPolicies = update.TeamAccessPolicies
+			}
 			writeJSON(map[string]any{})
 		case key == "POST /api/users":
 			f.users[9] = "created"
@@ -164,19 +191,73 @@ func TestProvisionTier_CleansUpOnFailure(t *testing.T) {
 	}
 }
 
-func TestSetEndpointTeamAccess_UsesStandardUserRole(t *testing.T) {
-	var body map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "PUT" {
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		}
-		_, _ = w.Write([]byte(`{"TeamAccessPolicies":{}}`))
-	}))
-	defer srv.Close()
+func TestSetEndpointTeamAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		roles      []config.Role
+		ignorePuts bool
+		wantRoleID float64
+		wantName   string
+		wantErr    string
+	}{
+		{
+			name:       "looks up Standard user by name",
+			roles:      portainerRoles,
+			wantRoleID: 3,
+			wantName:   "Standard user",
+		},
+		{
+			name:       "uses the ID Portainer lists, not a fixed one",
+			roles:      []config.Role{{ID: 4, Name: "Read-only user"}, {ID: 9, Name: "Standard user"}},
+			wantRoleID: 9,
+			wantName:   "Standard user",
+		},
+		{
+			name:       "falls back to role 3 when Portainer lists no roles",
+			roles:      nil,
+			wantRoleID: 3,
+			wantName:   "Standard user",
+		},
+		{
+			name:    "fails when there is no Standard user role",
+			roles:   []config.Role{{ID: 1, Name: "Environment administrator"}},
+			wantErr: `no "Standard user" role`,
+		},
+		{
+			name:       "fails when the role doesn't read back",
+			roles:      portainerRoles,
+			ignorePuts: true,
+			wantRoleID: 3,
+			wantErr:    `team's role as "no access"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePortainer()
+			f.roles = tt.roles
+			f.ignorePuts = tt.ignorePuts
+			f.teamPolicies = map[string]any{"2": map[string]any{"RoleId": 1}}
+			srv := httptest.NewServer(f.handler(t))
+			defer srv.Close()
 
-	require.NoError(t, config.NewPortainerAPI(srv.URL, false).SetEndpointTeamAccess(1, 5))
-	policies := body["TeamAccessPolicies"].(map[string]any)
-	assert.Equal(t, float64(config.StandardUserRoleID), policies["5"].(map[string]any)["RoleId"])
+			role, err := config.NewPortainerAPI(srv.URL, false).SetEndpointTeamAccess(1, 5)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantName, role.Name)
+			}
+			if tt.wantRoleID == 0 {
+				assert.Empty(t, f.endpointPuts)
+				return
+			}
+			require.Len(t, f.endpointPuts, 1)
+			var body struct{ TeamAccessPolicies map[string]map[string]any }
+			require.NoError(t, json.Unmarshal([]byte(f.endpointPuts[0]), &body))
+			assert.Equal(t, tt.wantRoleID, body.TeamAccessPolicies["5"]["RoleId"])
+			assert.Equal(t, float64(1), body.TeamAccessPolicies["2"]["RoleId"], "other teams keep their roles")
+		})
+	}
 }
 
 func TestResolveCompose(t *testing.T) {
@@ -304,6 +385,44 @@ func TestEnsureGitignore(t *testing.T) {
 	again, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
 	assert.Equal(t, string(data), string(again))
+}
+
+func TestEnsureGitignore_ReplacesLegacyDirectoryEntries(t *testing.T) {
+	dir := t.TempDir()
+	// What v0.4.0 appended to an existing repository's .gitignore.
+	legacy := "node_modules/\n.claude/agents/local/\n\n" + gitignoreHeader + "\n.mcp.json\n.claude/\n.cursor/\n.gemini/\ntowline.json\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(legacy), 0644))
+
+	require.NoError(t, ensureGitignore(dir))
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, "node_modules/\n.claude/agents/local/\n\n"+gitignoreHeader+"\n.cursor/mcp.json\n.gemini/settings.json\n.mcp.json\ntowline.json\n", string(data))
+
+	// A directory entry the user wrote outside our block is theirs to keep,
+	// and already covers the file inside it.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".cursor/\n"), 0644))
+	require.NoError(t, ensureGitignore(dir))
+	data, err = os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(string(data), ".cursor/\n"))
+	assert.NotContains(t, string(data), ".cursor/mcp.json")
+	assert.NotContains(t, string(data), ".claude")
+}
+
+func TestTrackedSecrets_OnlyTokenFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	require.NoError(t, exec.Command("git", "-C", dir, "init", "-q").Run())
+	for _, f := range []string{".claude/settings.json", ".claude/agents/x.md", ".cursor/rules/x.mdc", ".gemini/settings.json"} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(dir, f)), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte(`{}`), 0644))
+	}
+	gitCommitAll(t, dir)
+
+	assert.Equal(t, []string{".gemini/settings.json"}, trackedSecrets(dir))
 }
 
 func TestValidateProjectName(t *testing.T) {
@@ -459,7 +578,7 @@ func TestInit_EndToEndWithPack(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 		out, err := exec.Command("git", "-C", dir, "ls-files").Output()
 		require.NoError(t, err)
-		for _, secret := range []string{".mcp.json", "towline.json", ".claude/settings.json"} {
+		for _, secret := range []string{".mcp.json", "towline.json", ".cursor/mcp.json", ".gemini/settings.json"} {
 			assert.NotContains(t, strings.Split(string(out), "\n"), secret)
 		}
 	}
@@ -534,13 +653,13 @@ func TestInit_ExistingCodebaseRefusals(t *testing.T) {
 			wantErr: "git rm --cached",
 		},
 		{
-			name: "claude settings tracked by git",
+			name: "cursor mcp config tracked by git",
 			prepare: func(t *testing.T, dir string) {
-				require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0755))
-				require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(`{}`), 0644))
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, ".cursor"), 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".cursor", "mcp.json"), []byte(`{}`), 0644))
 				gitCommitAll(t, dir)
 			},
-			wantErr: ".claude/settings.json",
+			wantErr: ".cursor/mcp.json",
 		},
 		{
 			name: "unparsable mcp config",

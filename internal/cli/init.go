@@ -343,11 +343,13 @@ func provisionTier(api *config.PortainerAPI, globalCfg *config.GlobalConfig, sta
 
 	// Grant team access to environment
 	fmt.Print("Granting environment access... ")
-	if err = api.SetEndpointTeamAccess(globalCfg.PortainerEnvID, teamID); err != nil {
+	role, err := api.SetEndpointTeamAccess(globalCfg.PortainerEnvID, teamID)
+	if err != nil {
 		err = fmt.Errorf("failed to set endpoint access: %w", err)
 		return
 	}
-	fmt.Println("OK")
+	fmt.Printf("OK (%s)\n", role.Name)
+	warnIfCannotUpdateStacks(role)
 
 	// Create user for the project
 	username := "towline-" + stackName
@@ -544,11 +546,21 @@ func validateProjectName(name string) error {
 }
 
 // secretGitignoreEntries are the generated files that contain the project's
-// Portainer API token or provisioning details.
-var secretGitignoreEntries = []string{".mcp.json", ".claude/", ".cursor/", ".gemini/", "towline.json"}
+// Portainer API token or provisioning details. Only these files are
+// ignored: .claude/, .cursor/ and .gemini/ often hold other configuration a
+// repository tracks on purpose.
+var secretGitignoreEntries = []string{".mcp.json", ".cursor/mcp.json", ".gemini/settings.json", "towline.json"}
+
+// gitignoreHeader introduces the entries ensureGitignore appends.
+const gitignoreHeader = "# Towline agent configuration (contains API tokens)"
+
+// legacyGitignoreDirs are whole directories earlier releases appended under
+// gitignoreHeader. They are replaced by the specific token files.
+var legacyGitignoreDirs = map[string]bool{".claude/": true, ".cursor/": true, ".gemini/": true}
 
 // ensureGitignore appends any missing secret entries to an existing
-// project's .gitignore (creating it if needed).
+// project's .gitignore (creating it if needed), and drops the directory
+// entries earlier releases appended in their place.
 func ensureGitignore(projectDir string) error {
 	path := filepath.Join(projectDir, ".gitignore")
 	existing, err := os.ReadFile(path)
@@ -556,29 +568,67 @@ func ensureGitignore(projectDir string) error {
 		return err
 	}
 
+	var kept []string
+	inBlock, changed, header := false, false, -1
 	present := map[string]bool{}
 	for _, line := range strings.Split(string(existing), "\n") {
-		present[strings.TrimSpace(line)] = true
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == gitignoreHeader:
+			inBlock, header = true, len(kept)
+		case trimmed == "" || strings.HasPrefix(trimmed, "#"):
+			inBlock = false
+		case inBlock && legacyGitignoreDirs[trimmed]:
+			changed = true
+			continue
+		}
+		kept = append(kept, line)
+		present[trimmed] = true
 	}
 
 	var missing []string
 	for _, entry := range secretGitignoreEntries {
-		if !present[entry] && !present["/"+entry] {
+		if !gitignoreCovers(present, entry) {
 			missing = append(missing, entry)
 		}
 	}
-	if len(missing) == 0 {
+	if len(missing) == 0 && !changed {
 		return nil
 	}
 
-	var b strings.Builder
-	b.Write(existing)
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
-		b.WriteString("\n")
+	// Missing entries go under our header when there is one, else into a
+	// new block at the end.
+	if header >= 0 {
+		kept = append(kept[:header+1], append(missing, kept[header+1:]...)...)
+		missing = nil
 	}
-	b.WriteString("\n# Towline agent configuration (contains API tokens)\n")
-	for _, entry := range missing {
-		b.WriteString(entry + "\n")
+	content := strings.Join(kept, "\n")
+
+	var b strings.Builder
+	b.WriteString(content)
+	if len(missing) > 0 {
+		if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n" + gitignoreHeader + "\n")
+		for _, entry := range missing {
+			b.WriteString(entry + "\n")
+		}
 	}
 	return os.WriteFile(path, []byte(b.String()), publicFileMode)
+}
+
+// gitignoreCovers reports whether .gitignore lines already ignore entry,
+// directly or through its parent directory.
+func gitignoreCovers(present map[string]bool, entry string) bool {
+	candidates := []string{entry}
+	if dir, _, ok := strings.Cut(entry, "/"); ok {
+		candidates = append(candidates, dir, dir+"/")
+	}
+	for _, c := range candidates {
+		if present[c] || present["/"+c] {
+			return true
+		}
+	}
+	return false
 }

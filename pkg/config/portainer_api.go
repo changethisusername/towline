@@ -12,8 +12,19 @@ import (
 	"time"
 )
 
-// StandardUserRoleID is Portainer's "Standard user" environment role.
-const StandardUserRoleID = 4
+// StandardUserRoleName is the Portainer environment role project teams get:
+// it can manage the stacks the team owns, but not other teams' resources.
+const StandardUserRoleName = "Standard user"
+
+// fallbackStandardUserRoleID is the Standard user role's ID, used only when
+// Portainer doesn't list its roles. Portainer's built-in roles are
+// 1 Environment administrator, 2 Helpdesk, 3 Standard user, 4 Read-only user
+// and 5 Operator.
+const fallbackStandardUserRoleID = 3
+
+// stackUpdateAuthorization is the role authorization Portainer checks before
+// updating a stack.
+const stackUpdateAuthorization = "PortainerStackUpdate"
 
 // requestTimeout bounds each Portainer API call so an unresponsive server
 // can't hang the CLI. Creating or deleting a stack runs docker compose (and
@@ -243,23 +254,98 @@ func (p *PortainerAPI) AddTeamMember(teamID, userID int) error {
 	return nil
 }
 
-// SetEndpointTeamAccess grants a team access to a Portainer environment (endpoint).
-func (p *PortainerAPI) SetEndpointTeamAccess(endpointID, teamID int) error {
-	// First, get current endpoint configuration
-	resp, err := p.doRequest("GET", fmt.Sprintf("/api/endpoints/%d", endpointID), nil)
+// Role is a Portainer environment role.
+type Role struct {
+	ID             int             `json:"Id"`
+	Name           string          `json:"Name"`
+	Authorizations map[string]bool `json:"Authorizations"`
+}
+
+// CanUpdateStacks reports whether the role may update stacks. known is
+// false when Portainer listed no authorizations for the role.
+func (r Role) CanUpdateStacks() (can, known bool) {
+	if len(r.Authorizations) == 0 {
+		return false, false
+	}
+	return r.Authorizations[stackUpdateAuthorization], true
+}
+
+// errRolesUnavailable means this Portainer doesn't serve /api/roles.
+var errRolesUnavailable = errors.New("portainer does not list roles")
+
+// ListRoles returns Portainer's environment roles.
+func (p *PortainerAPI) ListRoles() ([]Role, error) {
+	resp, err := p.doRequest("GET", "/api/roles", nil)
 	if err != nil {
-		return fmt.Errorf("failed to get endpoint: %w", err)
+		return nil, fmt.Errorf("failed to list roles: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errRolesUnavailable
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to get endpoint (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("failed to list roles (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	var endpoint map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&endpoint); err != nil {
-		return fmt.Errorf("failed to decode endpoint: %w", err)
+	var roles []Role
+	if err := json.NewDecoder(resp.Body).Decode(&roles); err != nil {
+		return nil, fmt.Errorf("failed to decode roles: %w", err)
+	}
+	return roles, nil
+}
+
+// listRolesOrFallback lists Portainer's roles. On a Portainer that doesn't
+// list them it returns only the built-in Standard user role.
+func (p *PortainerAPI) listRolesOrFallback() ([]Role, error) {
+	roles, err := p.ListRoles()
+	if errors.Is(err, errRolesUnavailable) {
+		return []Role{{ID: fallbackStandardUserRoleID, Name: StandardUserRoleName}}, nil
+	}
+	return roles, err
+}
+
+// findRole returns the role with the given ID, or a placeholder naming the ID.
+func findRole(roles []Role, id int) Role {
+	for _, r := range roles {
+		if r.ID == id {
+			return r
+		}
+	}
+	if id == 0 {
+		return Role{Name: "no access"}
+	}
+	return Role{ID: id, Name: fmt.Sprintf("unknown role %d", id)}
+}
+
+// standardUserRole finds the Standard user role by name, so the ID never
+// depends on how a Portainer edition numbers its roles.
+func standardUserRole(roles []Role) (Role, error) {
+	for _, r := range roles {
+		if strings.EqualFold(r.Name, StandardUserRoleName) {
+			return r, nil
+		}
+	}
+	return Role{}, fmt.Errorf("portainer has no %q role", StandardUserRoleName)
+}
+
+// SetEndpointTeamAccess gives a team the Standard user role on a Portainer
+// environment (endpoint) and returns the role Portainer reports afterwards.
+// It fails if Portainer reports any other role.
+func (p *PortainerAPI) SetEndpointTeamAccess(endpointID, teamID int) (Role, error) {
+	roles, err := p.listRolesOrFallback()
+	if err != nil {
+		return Role{}, err
+	}
+	want, err := standardUserRole(roles)
+	if err != nil {
+		return Role{}, err
+	}
+
+	endpoint, err := p.getEndpoint(endpointID)
+	if err != nil {
+		return Role{}, err
 	}
 
 	// Update team access policies
@@ -269,30 +355,79 @@ func (p *PortainerAPI) SetEndpointTeamAccess(endpointID, teamID int) error {
 	}
 	teamAccessPolicies[fmt.Sprintf("%d", teamID)] = map[string]any{
 		// Standard user: can manage stacks it owns, but not other teams'
-		// resources. Environment administrator (1) would let every project's
-		// key manage every other project's stacks on the shared environment.
-		"RoleId": StandardUserRoleID,
+		// resources. Environment administrator would let every project's
+		// key manage every other project's stacks on the shared environment,
+		// and Read-only user can't update stacks at all.
+		"RoleId": want.ID,
 	}
 
 	payload, err := json.Marshal(map[string]any{
 		"TeamAccessPolicies": teamAccessPolicies,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal endpoint update: %w", err)
+		return Role{}, fmt.Errorf("failed to marshal endpoint update: %w", err)
 	}
 
-	resp2, err := p.doRequest("PUT", fmt.Sprintf("/api/endpoints/%d", endpointID), payload)
+	resp, err := p.doRequest("PUT", fmt.Sprintf("/api/endpoints/%d", endpointID), payload)
 	if err != nil {
-		return fmt.Errorf("failed to update endpoint access: %w", err)
+		return Role{}, fmt.Errorf("failed to update endpoint access: %w", err)
 	}
-	defer resp2.Body.Close()
+	defer resp.Body.Close()
 
-	if resp2.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp2.Body)
-		return fmt.Errorf("failed to update endpoint access (status %d): %s", resp2.StatusCode, string(body))
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return Role{}, fmt.Errorf("failed to update endpoint access (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	return nil
+	// Read the role back rather than trusting the update.
+	got, err := p.teamRole(endpointID, teamID, roles)
+	if err != nil {
+		return Role{}, err
+	}
+	if got.ID != want.ID {
+		return got, fmt.Errorf("portainer reports the team's role as %q, not %q", got.Name, want.Name)
+	}
+	return got, nil
+}
+
+// TeamRole returns the role a team holds on a Portainer environment.
+func (p *PortainerAPI) TeamRole(endpointID, teamID int) (Role, error) {
+	roles, err := p.listRolesOrFallback()
+	if err != nil {
+		return Role{}, err
+	}
+	return p.teamRole(endpointID, teamID, roles)
+}
+
+func (p *PortainerAPI) teamRole(endpointID, teamID int, roles []Role) (Role, error) {
+	endpoint, err := p.getEndpoint(endpointID)
+	if err != nil {
+		return Role{}, err
+	}
+	policies, _ := endpoint["TeamAccessPolicies"].(map[string]any)
+	policy, _ := policies[fmt.Sprintf("%d", teamID)].(map[string]any)
+	id, _ := policy["RoleId"].(float64)
+	return findRole(roles, int(id)), nil
+}
+
+// getEndpoint returns a Portainer environment's raw configuration.
+func (p *PortainerAPI) getEndpoint(endpointID int) (map[string]any, error) {
+	resp, err := p.doRequest("GET", fmt.Sprintf("/api/endpoints/%d", endpointID), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get endpoint (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var endpoint map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&endpoint); err != nil {
+		return nil, fmt.Errorf("failed to decode endpoint: %w", err)
+	}
+	return endpoint, nil
 }
 
 // ListEnvironments returns all Portainer environments (endpoints).
