@@ -31,9 +31,11 @@ type TemplateData struct {
 	// ApprovalWebhook and ApprovalWebhookToken configure human approval.
 	ApprovalWebhook      string
 	ApprovalWebhookToken string
-	// ComposePolicyOff and AllowBindMounts relax the compose policy.
+	// ComposePolicyOff, AllowBindMounts and AllowNetworks relax the
+	// compose policy.
 	ComposePolicyOff bool
 	AllowBindMounts  string
+	AllowNetworks    string
 }
 
 // Permissions for generated files. Agent configs contain the project's

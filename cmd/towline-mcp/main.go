@@ -59,6 +59,7 @@ func main() {
 	approvalModeFlag := flag.String("approval-mode", "", "Who approves prod operations: human (approval server) or agent (the agent confirms by re-calling). Default: human if -approval-webhook is set, else agent")
 	composePolicyFlag := flag.String("compose-policy", "enforce", "Compose security policy for stack create/update: enforce or off")
 	allowBindMountsFlag := flag.String("allow-bind-mounts", "", "Comma-separated host paths that stacks may bind mount (\".\" allows paths inside the stack directory)")
+	allowNetworksFlag := flag.String("allow-networks", "", "Comma-separated external network names that stacks may join (host, none and bridge are never allowed)")
 
 	flag.Parse()
 
@@ -95,6 +96,11 @@ func main() {
 	for _, p := range strings.Split(*allowBindMountsFlag, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			composePolicy.AllowBindMounts = append(composePolicy.AllowBindMounts, p)
+		}
+	}
+	for _, n := range strings.Split(*allowNetworksFlag, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			composePolicy.AllowNetworks = append(composePolicy.AllowNetworks, n)
 		}
 	}
 

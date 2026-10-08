@@ -78,8 +78,8 @@ volumes:
 		{name: "external volume false", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    external: false\n", wantErr: `"external" is not allowed`},
 		{name: "named volume of another project", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    name: otherapp_db_data\n", wantErr: `volume "v": "name" is not allowed`},
 		{name: "local volume driver allowed", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    driver: local\n  w: {}\n"},
-		{name: "external network", compose: "services:\n  a:\n    image: x\n    networks: [n]\nnetworks:\n  n:\n    external: true\n", wantErr: `network "n": "external" is not allowed`},
-		{name: "named network of another project", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    name: otherapp_default\n", wantErr: `network "n": "name" is not allowed`},
+		{name: "external network", compose: "services:\n  a:\n    image: x\n    networks: [n]\nnetworks:\n  n:\n    external: true\n", wantErr: `network "n": external network "n" is not allowed`},
+		{name: "named network of another project", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    name: otherapp_default\n", wantErr: `external network "otherapp_default" is not allowed`},
 		{name: "network driver_opts", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver_opts:\n      parent: eth0\n", wantErr: "driver_opts"},
 		{name: "host network driver", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver: host\n", wantErr: "only the bridge and overlay"},
 		{name: "macvlan network driver", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver: macvlan\n", wantErr: "only the bridge and overlay"},
@@ -219,4 +219,47 @@ func TestBindMountSources(t *testing.T) {
 `
 	assert.Equal(t, []string{"/srv/a", "/var/run/docker.sock", "./cfg"}, BindMountSources(compose))
 	assert.Nil(t, BindMountSources("services: ["))
+}
+
+func TestComposePolicy_AllowNetworks(t *testing.T) {
+	policy := ComposePolicy{AllowNetworks: []string{"proxy", "traefik_public", "host", "bridge", "none"}}
+	tests := []struct {
+		name    string
+		network string // top-level network definition under "networks:"
+		wantErr string // empty means allowed
+	}{
+		{name: "allowed external by key", network: "  proxy:\n    external: true\n"},
+		{name: "allowed by name", network: "  web:\n    name: traefik_public\n    external: true\n"},
+		{name: "name overrides key", network: "  proxy:\n    name: otherapp_default\n    external: true\n", wantErr: `external network "otherapp_default" is not allowed`},
+		{name: "not on allowlist", network: "  other:\n    external: true\n", wantErr: "compose_policy.allow_networks"},
+		{name: "host never allowed", network: "  host:\n    external: true\n", wantErr: `joining the "host" network is not allowed`},
+		{name: "bridge never allowed by name", network: "  n:\n    name: bridge\n", wantErr: `joining the "bridge" network is not allowed`},
+		{name: "none never allowed", network: "  n:\n    name: none\n    external: true\n", wantErr: `joining the "none" network is not allowed`},
+		{name: "interpolated name", network: "  proxy:\n    name: ${NET}\n    external: true\n", wantErr: "is not allowed"},
+		{name: "non-string name", network: "  proxy:\n    name: [proxy]\n", wantErr: "is not allowed"},
+		{name: "driver_opts still rejected", network: "  proxy:\n    external: true\n    driver_opts:\n      parent: eth0\n", wantErr: "driver_opts"},
+		{name: "driver still checked", network: "  proxy:\n    external: true\n    driver: macvlan\n", wantErr: "only the bridge and overlay"},
+		{name: "stack network unaffected", network: "  internal:\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compose := "services:\n  a:\n    image: x\nnetworks:\n" + tt.network
+			violations := policy.Validate(compose)
+			if tt.wantErr == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.NotEmpty(t, violations)
+			assert.Contains(t, strings.Join(violations, "\n"), tt.wantErr)
+		})
+	}
+
+	// Without an allowlist the strict default rejects external networks.
+	assert.NotEmpty(t, ValidateCompose("services:\n  a:\n    image: x\nnetworks:\n  proxy:\n    external: true\n"))
+}
+
+func TestExternalNetworkNames(t *testing.T) {
+	compose := "services: {}\nnetworks:\n  b:\n    external: true\n  a:\n    name: shared\n  c:\n  d: {}\n  e:\n    name: [x]\n"
+	assert.Equal(t, []string{"shared", "b"}, ExternalNetworkNames(compose))
+	assert.Nil(t, ExternalNetworkNames("networks: ["))
 }

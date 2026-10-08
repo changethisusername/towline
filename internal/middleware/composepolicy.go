@@ -35,7 +35,7 @@ func NewComposePolicy(toolName string, policy ComposePolicy) MiddlewareFunc {
 			}
 			if violations := policy.Validate(file); len(violations) > 0 {
 				return mcp.NewToolResultError("Compose file rejected by security policy:\n- " + strings.Join(violations, "\n- ") +
-					"\nIf the stack genuinely needs this, ask your human partner: they can allow specific bind mounts (or disable the policy) under compose_policy in towline.json and run 'towline refresh'."), nil
+					"\nIf the stack genuinely needs this, ask your human partner: they can allow specific bind mounts or external networks (or disable the policy) under compose_policy in towline.json and run 'towline refresh'."), nil
 			}
 			return next(ctx, request)
 		}
@@ -51,6 +51,43 @@ type ComposePolicy struct {
 	// path allows itself and everything below it; "." allows relative paths
 	// inside the stack directory.
 	AllowBindMounts []string
+	// AllowNetworks lists external networks (by effective name: "name" if
+	// set, else the key) that stacks may join, e.g. a shared proxy network.
+	// host, none and bridge are never allowed.
+	AllowNetworks []string
+}
+
+// reservedNetworkNames are Docker's built-in networks; joining them as an
+// external network is never allowed, even when listed in AllowNetworks.
+var reservedNetworkNames = map[string]bool{"host": true, "none": true, "bridge": true}
+
+// allowsNetwork reports whether an external network name is on the allowlist.
+func (p ComposePolicy) allowsNetwork(name string) bool {
+	if name == "" || reservedNetworkNames[name] || strings.Contains(name, "$") {
+		return false
+	}
+	for _, allowed := range p.AllowNetworks {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+// externalNetworkName returns the effective name of a top-level network
+// that refers to a network outside the stack ("external" or "name" set),
+// and whether it does. The name is "" if it is not a plain string.
+func externalNetworkName(key string, net map[string]any) (string, bool) {
+	_, hasExternal := net["external"]
+	rawName, hasName := net["name"]
+	if !hasExternal && !hasName {
+		return "", false
+	}
+	if !hasName {
+		return key, true
+	}
+	name, _ := rawName.(string)
+	return name, true
 }
 
 // allowsBind reports whether a bind mount source is on the allowlist.
@@ -140,9 +177,12 @@ func (p ComposePolicy) Validate(content string) []string {
 			if !ok {
 				continue
 			}
-			for _, key := range []string{"external", "name"} {
-				if _, ok := net[key]; ok {
-					add("network %q: %q is not allowed (it can join another project's network)", name, key)
+			if ext, ok := externalNetworkName(name, net); ok {
+				switch {
+				case reservedNetworkNames[ext]:
+					add("network %q: joining the %q network is not allowed", name, ext)
+				case !p.allowsNetwork(ext):
+					add("network %q: external network %q is not allowed (it can join another project's network); a human can allow it in compose_policy.allow_networks", name, ext)
 				}
 			}
 			if _, ok := net["driver_opts"]; ok {
@@ -445,6 +485,31 @@ func isSafeRelativePath(p string) bool {
 	}
 	clean := path.Clean(p)
 	return clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+// ExternalNetworkNames returns the effective names of top-level networks
+// that refer to networks outside the stack ("external" or "name" set), in
+// key order. Names that are not plain strings are skipped.
+func ExternalNetworkNames(content string) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return nil
+	}
+	nets, _ := doc["networks"].(map[string]any)
+	keys := make([]string, 0, len(nets))
+	for key := range nets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var out []string
+	for _, key := range keys {
+		net, _ := nets[key].(map[string]any)
+		if name, ok := externalNetworkName(key, net); ok && name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // BindMountSources returns the host paths bind mounted by services in a
