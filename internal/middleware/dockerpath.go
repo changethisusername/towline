@@ -66,7 +66,6 @@ var allowedContainerActions = map[string]bool{
 	"kill":    true,
 	"pause":   true,
 	"unpause": true,
-	"wait":    true,
 	"resize":  true,
 	"rename":  true,
 	"update":  true,
@@ -111,4 +110,37 @@ var reservedContainerIDs = map[string]bool{
 	"json":   true,
 	"create": true,
 	"prune":  true,
+}
+
+// containerStreamRoute matches /containers/{id}/{endpoint}.
+var containerStreamRoute = regexp.MustCompile(`^/containers/([^/]+)/(attach|attach/ws|stats|logs)$`)
+
+// dockerBool mirrors Docker's boolean query parsing.
+func dockerBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "no", "false", "none":
+		return false
+	}
+	return true
+}
+
+// isStreamingDockerRead reports reads that never end on their own (event
+// streams, attach, streaming stats, followed logs). Through the remote
+// gateway they would run detached forever.
+func isStreamingDockerRead(path string, query map[string]string) bool {
+	if path == "/events" {
+		return true
+	}
+	m := containerStreamRoute.FindStringSubmatch(path)
+	if m == nil {
+		return false
+	}
+	switch m[2] {
+	case "stats":
+		v, ok := query["stream"]
+		return !ok || dockerBool(v)
+	case "logs":
+		return dockerBool(query["follow"])
+	}
+	return true
 }

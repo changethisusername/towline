@@ -36,7 +36,8 @@ Cloudflare ends a request that gets no answer within 100 seconds. A tool call th
 On the machine where you use the `towline` CLI:
 
 ```bash
-towline remote setup --url https://mcp.example.com --tunnel-token <token> shop blog
+export TUNNEL_TOKEN=<token>   # or --tunnel-token, which shows up in shell history
+towline remote setup --url https://mcp.example.com shop blog
 #   or --all to serve every project
 ```
 

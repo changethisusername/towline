@@ -482,6 +482,17 @@ func TestDynamicRegistrationNeedsPairingAndOwner(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Location") != "" || !strings.Contains(string(page), "Allow an app") {
 		t.Fatalf("authorize for pending client: %d", resp.StatusCode)
 	}
+	// The details and the decision form are only shown to the owner.
+	owner := noRedirectClient()
+	if resp, _ := postForm(t, owner, tg.url+"/ui/login", url.Values{"token": {testOwnerToken}}, "", ""); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("owner login: %d", resp.StatusCode)
+	}
+	resp, err = owner.Get(authorizeURL(tg.url, clientID, "https://claude.ai/api/mcp/auth_callback", challenge, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
 	reqID := hiddenRequest.FindStringSubmatch(string(page))[1]
 
 	consent := func(form url.Values, origin string) *http.Response {

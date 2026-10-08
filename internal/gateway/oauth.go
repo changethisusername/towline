@@ -262,7 +262,9 @@ type authzRequest struct {
 	Resource      string
 	CodeChallenge string
 	// Pending is set for a dynamically registered client not yet approved.
-	Pending   bool
+	Pending bool
+	// IP is the requester's address, for the per-address cap.
+	IP        string
 	ExpiresAt time.Time
 }
 
@@ -340,6 +342,7 @@ func (g *Gateway) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Resource:      resource,
 		CodeChallenge: challenge,
 		Pending:       pending != nil,
+		IP:            g.clientIP(r),
 		ExpiresAt:     g.now().Add(authzRequestTTL),
 	}
 	if !g.saveAuthzRequest(req) {
@@ -432,8 +435,21 @@ func (g *Gateway) saveAuthzRequest(req *authzRequest) bool {
 			delete(g.authzReq, id)
 		}
 	}
-	if len(g.authzReq) >= 100 {
+	n := 0
+	var oldest *authzRequest
+	for _, a := range g.authzReq {
+		if a.IP == req.IP {
+			n++
+		}
+		if oldest == nil || a.ExpiresAt.Before(oldest.ExpiresAt) {
+			oldest = a
+		}
+	}
+	if n >= 10 {
 		return false
+	}
+	if len(g.authzReq) >= 100 && oldest != nil {
+		delete(g.authzReq, oldest.ID)
 	}
 	g.authzReq[req.ID] = req
 	return true
@@ -697,6 +713,7 @@ type consentData struct {
 	LoggedIn   bool
 	Message    string
 	Public     bool
+	Next       string
 }
 
 func (g *Gateway) renderConsent(w http.ResponseWriter, r *http.Request, req *authzRequest, conn *Connection, msg string) {
@@ -708,10 +725,16 @@ func (g *Gateway) renderConsent(w http.ResponseWriter, r *http.Request, req *aut
 		// allowed here, not only on the redirect response.
 		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; style-src 'unsafe-inline'; form-action 'self' %s; frame-ancestors 'none'; base-uri 'none'", cspSource(u)))
 	}
-	if conn != nil {
-		d.Projects, d.Scope = conn.Projects, string(conn.Scope)
-	} else {
-		d.Pairings = g.store.Pairings()
+	// What the owner is granting (projects, open pairings) is only shown
+	// to the owner; anyone can reach this page during a pairing.
+	if d.LoggedIn {
+		if conn != nil {
+			d.Projects, d.Scope = conn.Projects, string(conn.Scope)
+		} else {
+			d.Pairings = g.store.Pairings()
+		}
+	} else if r.Method == http.MethodGet {
+		d.Next = r.URL.RequestURI()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if msg != "" {

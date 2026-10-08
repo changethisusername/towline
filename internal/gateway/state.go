@@ -135,6 +135,9 @@ type oauthToken struct {
 	// copied, and revokes the whole grant.
 	Successors []string `json:"successors,omitempty"`
 	Used       bool     `json:"used,omitempty"`
+	// GraceUntil is when a rotated token stops being accepted for
+	// retries. It stays stored until ExpiresAt so later reuse is detected.
+	GraceUntil time.Time `json:"grace_until,omitzero"`
 }
 
 // authCode is a pending authorization code (memory only).
@@ -821,6 +824,11 @@ func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*to
 	// A retry within the grace window may have produced several
 	// successors. Once any of them has been used (or is gone), the old
 	// token turning up again means it was copied.
+	if len(t.Successors) > 0 && s.now().After(t.GraceUntil) {
+		s.revokeCodeTokensLocked(t.CodeHash)
+		_ = s.saveLocked()
+		return nil, "", errors.New("refresh token was already rotated; the grant is revoked")
+	}
 	for _, sh := range t.Successors {
 		if succ := s.refresh[sh]; succ == nil || succ.Used {
 			s.revokeCodeTokensLocked(t.CodeHash)
@@ -834,8 +842,8 @@ func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*to
 	// out.
 	rotate := c.Public()
 	if rotate {
-		if grace := s.now().Add(refreshGrace); t.ExpiresAt.After(grace) {
-			t.ExpiresAt = grace
+		if t.GraceUntil.IsZero() {
+			t.GraceUntil = s.now().Add(refreshGrace)
 		}
 	}
 	pair, err := s.issueTokensLocked(c.ID, t.Resource, t.CodeHash, rotate)

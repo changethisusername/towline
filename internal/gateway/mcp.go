@@ -298,6 +298,12 @@ func runDetached(ctx context.Context, req mcp.CallToolRequest, h server.ToolHand
 	}
 	done := make(chan result, 1)
 	go func() {
+		// mcp-go's WithRecovery only covers the request goroutine.
+		defer func() {
+			if p := recover(); p != nil {
+				done <- result{nil, fmt.Errorf("tool %s failed: %v", req.Params.Name, p)}
+			}
+		}()
 		res, err := h(context.WithoutCancel(ctx), req)
 		done <- result{res, err}
 	}()

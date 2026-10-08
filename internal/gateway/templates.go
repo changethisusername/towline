@@ -210,6 +210,14 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 <div class="card">
 <p>An app that calls itself <strong>"{{.ClientName}}"</strong> wants access. After you approve, the browser goes back to <strong><code>{{.Redirect}}</code></strong>.</p>
 <p class="meta">Only continue if you started this from that app just now. If you didn't, deny.</p>
+{{if and (not .LoggedIn) .Next}}
+<form method="post" action="/ui/login">
+<input type="hidden" name="next" value="{{.Next}}">
+<label for="token">Sign in with the owner token to review what this app gets</label>
+<input type="password" id="token" name="token" autocomplete="current-password" autofocus>
+<div class="actions"><button class="primary">Sign in</button></div>
+</form>
+{{else}}
 <form method="post" action="/oauth/authorize">
 <input type="hidden" name="request" value="{{.Request.ID}}">
 {{if .Projects}}
@@ -231,6 +239,7 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 <button class="danger" name="decision" value="deny">Deny</button>
 </div>
 </form>
+{{end}}
 </div>
 {{template "foot"}}{{end}}
 `))
