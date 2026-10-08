@@ -75,6 +75,7 @@ func readMCPServer(t *testing.T, file, name string) (args []string, env map[stri
 func TestRefresh_LegacyProject(t *testing.T) {
 	f := newFakePortainer()
 	f.teams[7] = "team-shop-prod"
+	f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
 	f.stackFiles = map[int]string{11: `services:
   web:
     image: nginx
@@ -144,6 +145,7 @@ volumes:
 func TestRefresh_HumanApprovalConfig(t *testing.T) {
 	f := newFakePortainer()
 	f.teams[7] = "team-shop-prod"
+	f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
 	f.stackFiles = map[int]string{11: "services:\n  web:\n    image: nginx\n"}
 	srv := httptest.NewServer(f.handler(t))
 	defer srv.Close()
@@ -165,6 +167,7 @@ func TestRefresh_HumanApprovalConfig(t *testing.T) {
 func TestRefresh_TeamNameMismatchSkipsRole(t *testing.T) {
 	f := newFakePortainer()
 	f.teams[7] = "team-someone-else"
+	f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
 	f.stackFiles = map[int]string{11: "services: {}\n"}
 	srv := httptest.NewServer(f.handler(t))
 	defer srv.Close()
@@ -223,4 +226,100 @@ func TestCarryOver_ValueFlags(t *testing.T) {
 	}
 	assert.Equal(t, "-server s -read-only -proxy traefik -tools=/t.yaml", strings.Join(got, " "))
 	assert.Equal(t, "1", entry["env"].(map[string]any)["FOO"])
+}
+
+func TestRefresh_VerifiesTowlineJSONIDs(t *testing.T) {
+	tests := []struct {
+		name            string
+		stack           config.StackInfo
+		envID           int // towline.json environment_id
+		wantStackFile   bool
+		wantPolicy      bool
+		wantEndpointPut bool
+	}{
+		{
+			name:  "matching stack and environment",
+			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}, envID: 1,
+			wantStackFile: true, wantPolicy: true, wantEndpointPut: true,
+		},
+		{
+			name:  "stack id points at another project's stack",
+			stack: config.StackInfo{ID: 11, Name: "victim-prod", EndpointID: 1}, envID: 1,
+			wantEndpointPut: true,
+		},
+		{
+			name:  "stack on another environment",
+			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 2}, envID: 1,
+			wantEndpointPut: true,
+		},
+		{
+			name:  "towline.json environment differs from configured one",
+			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}, envID: 2,
+			wantStackFile: true, wantPolicy: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePortainer()
+			f.teams[7] = "team-shop-prod"
+			f.stacks[11] = tt.stack
+			f.stackFiles = map[int]string{11: "services:\n  web:\n    image: nginx\n"}
+			srv := httptest.NewServer(f.handler(t))
+			defer srv.Close()
+
+			dir := setupLegacyProject(t, srv.URL, config.GlobalConfig{})
+			pc, err := config.LoadProjectConfig(dir)
+			require.NoError(t, err)
+			pc.EnvID = tt.envID
+			require.NoError(t, config.SaveProjectConfig(dir, pc))
+
+			require.NoError(t, runRefresh([]string{"shop"}))
+			assert.Equal(t, tt.wantStackFile, contains(f.requests, "GET /api/stacks/11/file"))
+			assert.NotContains(t, f.requests, "GET /api/endpoints/2", "must never use towline.json's environment")
+			assert.Equal(t, tt.wantEndpointPut, len(f.endpointPuts) == 1)
+			pc, err = config.LoadProjectConfig(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPolicy, pc.ComposePolicy != nil)
+		})
+	}
+}
+
+func TestMergeMCPServer_InvalidJSONIsAnError(t *testing.T) {
+	const broken = `{"mcpServers": {"github": {}},`
+	file := filepath.Join(t.TempDir(), ".mcp.json")
+	require.NoError(t, os.WriteFile(file, []byte(broken), 0600))
+	err := mergeMCPServer(file, "mcp-json.tmpl", "towline-dev", TemplateData{StackName: "a-dev", Tier: "dev"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), file)
+	raw, _ := os.ReadFile(file)
+	assert.Equal(t, broken, string(raw), "the user's file is left alone")
+	_, statErr := os.Stat(file + ".bak")
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestCarryOver_FlagForms(t *testing.T) {
+	tests := []struct {
+		name string
+		old  []any
+		want string
+	}{
+		{"single dash with value", []any{"-token", "x", "-proxy", "caddy"}, "-server s -proxy caddy"},
+		{"double dash with value", []any{"--token", "x", "--proxy", "caddy"}, "-server s --proxy caddy"},
+		{"single dash equals", []any{"-token=x", "-proxy", "caddy"}, "-server s -proxy caddy"},
+		{"double dash equals", []any{"--approval-webhook=http://a", "--tier=prod", "-read-only"}, "-server s -read-only"},
+		{"boolean generated flag", []any{"--skip-tls-verify", "-read-only"}, "-server s -read-only"},
+		{"boolean generated flag with value", []any{"-skip-tls-verify=true", "-read-only"}, "-server s -read-only"},
+		{"user flag with equals kept", []any{"--tools=/t.yaml", "-stack", "a-dev"}, "-server s --tools=/t.yaml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := map[string]any{"args": []any{"-server", "s"}, "env": map[string]any{}}
+			carryOver(map[string]any{"args": tt.old}, entry)
+			var got []string
+			for _, a := range entry["args"].([]any) {
+				got = append(got, a.(string))
+			}
+			assert.Equal(t, tt.want, strings.Join(got, " "))
+		})
+	}
 }
