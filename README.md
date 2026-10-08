@@ -17,7 +17,7 @@ AI coding agents can write code, run tests, and manage git. But they stop at the
 ## The idea
 
 ```
-  $ towline init my-saas --template ai-stack
+  $ towline init --template ai-stack my-saas
   $ cd my-saas && claude
 
   You: "Build a RAG chatbot with document upload. Deploy it, expose it
@@ -77,7 +77,7 @@ Points Towline at your Portainer instance (CE 2.28+). Interactive wizard — tak
 ### 3. Create a project
 
 ```bash
-towline init my-app --template web-app
+towline init --template web-app my-app
 ```
 
 Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, `-`, `_`).
@@ -113,7 +113,7 @@ Every template gives your agent a running stack and the knowledge to operate it.
 | `n8n` | n8n + PostgreSQL | n8n workflow operations skill |
 
 ```bash
-towline init my-project --template ai-stack
+towline init --template ai-stack my-project
 ```
 
 Packs are the key to making agents effective at specific domains. The compose file gives them infrastructure; the skills teach them how to operate it; the MCP configs give them additional tools. [Create your own packs](#custom-packs) for any stack.
@@ -263,7 +263,7 @@ mcps:
 ```
 
 ```bash
-towline init new-project --template my-pack
+towline init --template my-pack new-project
 ```
 
 The pack's skills are copied into the project alongside the base DevOps skill. MCP configs are merged into `.mcp.json`, `.cursor/mcp.json`, and `.gemini/settings.json`. Your agent gets domain expertise out of the box. Pack MCP servers run automatically with your privileges when the agent starts — only add servers from verified publishers, pinned to an exact version.
@@ -293,7 +293,8 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 |------|---------|-------------|
 | `--tier` | `dev` | `dev` (full autonomy) or `prod` (approval-gated) |
 | `--template` | `default` | Template or pack name |
-| `--with-prod` | `false` | Also create a prod-tier stack |
+
+Flags go before the project name (`towline init --tier prod my-app`); flags after it are rejected.
 
 ---
 
