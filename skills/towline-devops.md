@@ -73,8 +73,9 @@ call again without approvalToken to get a new one.
 
 - towline_service_logs — Recent log output for a service. Strips Docker
   binary framing.
-  - Parameters: service (required), tail (int, default 200), since (RFC3339
-    timestamp, optional), filter (string, optional grep-like line filter)
+  - Parameters: service (required), tail (int, default 200), since (optional:
+    RFC3339 timestamp, a duration meaning "ago" such as 10m or 2h, or unix
+    seconds), filter (string, optional grep-like line filter)
 
 - towline_env_get — Read stack environment variables. Variables whose names
   contain KEY, SECRET, PASSWORD, or TOKEN have their values masked.
@@ -135,7 +136,7 @@ call again without approvalToken to get a new one.
 
 - towline_scale — Scale a service to N replicas. Warns if the service has
   persistent volumes.
-  - Parameters: service (string), replicas (int)
+  - Parameters: service (string), replicas (whole number, 0 to 20)
   - Prod tier: no approval (operational)
 
 - towline_exec — Run a command inside a running container.
