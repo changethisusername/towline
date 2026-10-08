@@ -241,3 +241,43 @@ func TestStackScoping_FailedDeleteKeepsStackID(t *testing.T) {
 	_, resolved := scoping.StackID()
 	assert.True(t, resolved)
 }
+
+func TestStackScoping_LazyStackLookup(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		args     map[string]any
+		found    bool
+		wantText string
+	}{
+		{name: "update finds stack created before startup", tool: "updateLocalStack", args: map[string]any{"id": float64(7)}, found: true, wantText: "executed"},
+		{name: "update rejects wrong id after lookup", tool: "updateLocalStack", args: map[string]any{"id": float64(8)}, found: true, wantText: "does not match"},
+		{name: "update while stack still missing", tool: "updateLocalStack", args: map[string]any{"id": float64(7)}, found: false, wantText: "has not been created yet"},
+		{name: "create refused when lookup finds stack", tool: "createLocalStack", args: map[string]any{"name": "myapp"}, found: true, wantText: "already exists"},
+		{name: "create allowed while stack missing", tool: "createLocalStack", args: map[string]any{"name": "myapp"}, found: false, wantText: "executed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			scoping := NewStackScoping("myapp", WithStackLookup(func() (int, bool) {
+				calls++
+				return 7, tt.found
+			}))
+			handler := scoping.ForTool(tt.tool)(passthroughHandler())
+
+			result, err := handler(context.Background(), makeRequest(tt.args))
+			require.NoError(t, err)
+			assert.Contains(t, result.Content[0].(mcp.TextContent).Text, tt.wantText)
+			assert.Equal(t, 1, calls)
+
+			id, resolved := scoping.StackID()
+			assert.Equal(t, tt.found, resolved)
+			if tt.found {
+				assert.Equal(t, 7, id)
+				// Once resolved, the lookup is not repeated.
+				_, _ = handler(context.Background(), makeRequest(tt.args))
+				assert.Equal(t, 1, calls)
+			}
+		})
+	}
+}

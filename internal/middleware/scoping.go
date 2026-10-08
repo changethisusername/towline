@@ -29,11 +29,41 @@ type StackScoping struct {
 	stackID   int
 	resolved  bool
 	mu        sync.RWMutex
+	lookup    func() (id int, found bool)
+}
+
+// ScopingOption configures a StackScoping.
+type ScopingOption func(*StackScoping)
+
+// WithStackLookup sets how to find the stack's ID while it is unresolved
+// (e.g. Portainer was unreachable at startup). lookup reports found=false
+// when the stack does not exist or cannot be looked up.
+func WithStackLookup(lookup func() (id int, found bool)) ScopingOption {
+	return func(s *StackScoping) { s.lookup = lookup }
 }
 
 // NewStackScoping creates a new StackScoping middleware for the given stack name.
-func NewStackScoping(stackName string) *StackScoping {
-	return &StackScoping{stackName: stackName}
+func NewStackScoping(stackName string, opts ...ScopingOption) *StackScoping {
+	s := &StackScoping{stackName: stackName}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// currentStackID returns the stack ID, looking it up first if unresolved.
+func (s *StackScoping) currentStackID() (int, bool) {
+	if id, resolved := s.StackID(); resolved || s.lookup == nil {
+		return id, resolved
+	}
+	if id, found := s.lookup(); found && id > 0 {
+		s.mu.Lock()
+		if !s.resolved {
+			s.stackID, s.resolved = id, true
+		}
+		s.mu.Unlock()
+	}
+	return s.StackID()
 }
 
 // SetStackID sets the resolved stack ID.
@@ -109,7 +139,7 @@ func (s *StackScoping) filterListResult(ctx context.Context, request mcp.CallToo
 }
 
 func (s *StackScoping) validateStackID(ctx context.Context, request mcp.CallToolRequest, next server.ToolHandlerFunc, toolName string) (*mcp.CallToolResult, error) {
-	id, resolved := s.StackID()
+	id, resolved := s.currentStackID()
 	if !resolved {
 		return mcp.NewToolResultError(fmt.Sprintf("Stack '%s' has not been created yet.", s.stackName)), nil
 	}
@@ -133,7 +163,7 @@ func (s *StackScoping) validateStackID(ctx context.Context, request mcp.CallTool
 }
 
 func (s *StackScoping) handleCreate(ctx context.Context, request mcp.CallToolRequest, next server.ToolHandlerFunc) (*mcp.CallToolResult, error) {
-	_, resolved := s.StackID()
+	_, resolved := s.currentStackID()
 	if resolved {
 		return mcp.NewToolResultError(fmt.Sprintf("Stack '%s' already exists. Use updateLocalStack to modify it.", s.stackName)), nil
 	}
