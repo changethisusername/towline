@@ -44,7 +44,8 @@ export default function AgentDocs() {
           <li><strong>towline CLI</strong> — A scaffolding tool. <code>towline init &lt;project&gt;</code> creates
           everything: Portainer team, scoped API key, container stack, agent configuration, compose files, and git repo.</li>
           <li><strong>Template packs</strong> — Compose files + agent skills + MCP configs bundled as starter kits
-          (api, fullstack, worker, static-site, databases, etc.).</li>
+          (<code>default</code>, <code>web-app</code>, <code>api</code>, and the <code>ai-stack</code> and <code>n8n</code> packs,
+          or your own).</li>
         </ol>
 
         <h2 id="how-it-works">How Your MCP Session Works</h2>
@@ -62,8 +63,9 @@ towline-mcp \\
           <code>env</code> block), not on the command line. Prod-tier configs also pass{" "}
           <code>-approval-mode human|agent</code> (plus <code>-approval-webhook &lt;url&gt;</code> and a{" "}
           <code>TOWLINE_APPROVAL_WEBHOOK_TOKEN</code> env var in human mode). <code>-skip-tls-verify</code> is added only
-          when the user said Portainer uses a self-signed certificate, and <code>-allow-bind-mounts</code> /{" "}
-          <code>-compose-policy off</code> only when the user relaxed the compose policy for the project.
+          when the user said Portainer uses a self-signed certificate, and <code>-allow-bind-mounts</code>,{" "}
+          <code>-allow-networks</code>, <code>-allow-volumes</code> or <code>-compose-policy off</code> only when the user
+          relaxed the compose policy for the project.
         </p>
         <p>
           This MCP server process is your gateway to the Portainer environment. Every tool call you make goes
@@ -104,7 +106,7 @@ towline-mcp \\
           <tbody>
             <tr><td><code>service</code></td><td>string</td><td>Yes</td><td>Service name from docker-compose</td></tr>
             <tr><td><code>tail</code></td><td>number</td><td>No</td><td>Lines to return (default 200)</td></tr>
-            <tr><td><code>since</code></td><td>string</td><td>No</td><td>RFC3339 timestamp filter</td></tr>
+            <tr><td><code>since</code></td><td>string</td><td>No</td><td>Only logs after this time: an RFC3339 timestamp (<code>2026-01-02T15:04:05Z</code>), a duration meaning that long ago (<code>10m</code>, <code>2h</code>), or unix seconds</td></tr>
             <tr><td><code>filter</code></td><td>string</td><td>No</td><td>Filter lines containing this string</td></tr>
           </tbody>
         </table>
@@ -119,11 +121,12 @@ towline-mcp \\
         </table>
 
         <h4><code>towline_env_set</code></h4>
-        <p>Set a stack environment variable. <strong>Requires approval in prod tier.</strong></p>
+        <p>Set a stack environment variable. A service restart may be needed to pick up the change. Recorded in{" "}
+        <code>towline_deployments</code> (name only, never the value). <strong>Requires approval in prod tier.</strong></p>
         <table>
           <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Variable name</td></tr>
+            <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Variable name. Must match <code>{"[A-Za-z_][A-Za-z0-9_]*"}</code>; <code>_TOWLINE_*</code> names are rejected.</td></tr>
             <tr><td><code>value</code></td><td>string</td><td>Yes</td><td>Variable value</td></tr>
             <tr><td><code>approvalToken</code></td><td>string</td><td>No</td><td>Token for prod tier approval</td></tr>
           </tbody>
@@ -134,6 +137,14 @@ towline-mcp \\
 
         <h4><code>towline_domains_add</code></h4>
         <p>Add domain routing to a service. <strong>Requires approval in prod tier.</strong></p>
+        <ul>
+          <li><strong>Traefik</strong> (labels in the compose file, then a redeploy): one domain per service. If the service
+          already has a Towline-managed route, remove that domain before adding another.</li>
+          <li><strong>Caddy</strong> (admin API): the service must exist in your compose file, and a hostname already routed by
+          another route cannot be claimed. Routes dial <code>&lt;service&gt;.&lt;stack&gt;.towline:&lt;port&gt;</code>; that
+          network alias is added to the service (and the stack redeployed) if it is missing.</li>
+          <li><strong>Cloudflare</strong>: returns instructions to carry out with the Cloudflare MCP.</li>
+        </ul>
         <table>
           <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
@@ -146,7 +157,9 @@ towline-mcp \\
         </table>
 
         <h4><code>towline_domains_remove</code></h4>
-        <p>Remove domain routing from a service. <strong>Requires approval in prod tier.</strong></p>
+        <p>Remove domain routing from a service. With Traefik, the service&apos;s router rule must be exactly{" "}
+        <code>{"Host(`domain`)"}</code>; for any other rule nothing is changed and you get an error (edit the labels in the
+        compose file instead). <strong>Requires approval in prod tier.</strong></p>
         <table>
           <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
@@ -158,12 +171,15 @@ towline-mcp \\
         </table>
 
         <h4><code>towline_scale</code></h4>
-        <p>Scale a service to N replicas. Warns if the service has persistent volumes. <strong>No approval required</strong> (operational).</p>
+        <p>Scale a service to N replicas by setting <code>deploy.replicas</code> and redeploying. Warns if the service has
+        persistent volumes. Refuses services whose definition or <code>deploy</code> block comes from YAML
+        anchors, aliases or merge keys (<code>&lt;&lt;</code>), since the change would affect other services or drop
+        inherited settings; give the service its own <code>deploy</code> block first. <strong>No approval required</strong> (operational).</p>
         <table>
           <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
             <tr><td><code>service</code></td><td>string</td><td>Yes</td><td>Service name</td></tr>
-            <tr><td><code>replicas</code></td><td>number</td><td>Yes</td><td>Number of replicas</td></tr>
+            <tr><td><code>replicas</code></td><td>number</td><td>Yes</td><td>Number of replicas: a whole number from 0 to 20</td></tr>
           </tbody>
         </table>
 
@@ -177,7 +193,8 @@ towline-mcp \\
         </table>
 
         <h4><code>towline_exec</code></h4>
-        <p>Execute a command inside a running container and capture stdout/stderr. <strong>Requires approval in prod tier.</strong></p>
+        <p>Execute a command inside a running container and capture stdout/stderr. Commands get 30 seconds; if one runs
+        longer, you get the output so far with a note that it may still be running. <strong>Requires approval in prod tier.</strong></p>
         <table>
           <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
@@ -221,22 +238,34 @@ towline-mcp \\
           In both dev and prod, <code>createLocalStack</code> and <code>updateLocalStack</code> reject compose files that use:
         </p>
         <ul>
-          <li><code>privileged</code>, <code>cap_add</code>, <code>devices</code></li>
-          <li><code>network_mode</code> host or <code>container:...</code>, <code>pid</code>, <code>ipc</code>, <code>uts</code>, <code>userns_mode</code>, <code>cgroup</code></li>
+          <li><code>privileged</code> (also on <code>post_start</code> / <code>pre_stop</code> hooks), <code>cap_add</code>, <code>devices</code></li>
+          <li><code>deploy.resources.reservations.devices</code> other than GPU reservations</li>
+          <li><code>network_mode</code> other than <code>bridge</code> or <code>none</code>; host or <code>container:...</code> for <code>pid</code>, <code>ipc</code>, <code>uts</code>, <code>userns_mode</code>, <code>cgroup</code></li>
           <li><code>security_opt</code> with <code>unconfined</code> or <code>disable</code></li>
           <li>Host bind mounts: absolute, relative (<code>./</code>), <code>~</code>, or <code>{"${VAR}"}</code> sources, and long-syntax <code>type: bind</code></li>
           <li><code>volumes_from</code></li>
-          <li>Volumes with <code>driver_opts</code> or a non-local driver</li>
+          <li>Volumes with <code>driver_opts</code>, a non-local driver, <code>external</code> or <code>name</code> (unless allowed, see below)</li>
+          <li>Networks with <code>external</code> or <code>name</code> (unless allowed), <code>driver_opts</code>, or a driver other than <code>bridge</code> / <code>overlay</code></li>
           <li><code>secrets</code> / <code>configs</code> with <code>file:</code></li>
           <li><code>env_file</code> outside the stack directory</li>
+          <li><code>external_links</code></li>
+          <li><code>build</code> from a local context (use a git/https URL or a prebuilt image)</li>
           <li>Top-level <code>include</code> / <code>extends</code></li>
+          <li>More than one YAML document (<code>---</code>) in the file</li>
+          <li>Service names, container names and network aliases under <code>.towline</code>, which are reserved for Caddy
+          routing (a service may only use its own <code>&lt;service&gt;.&lt;stack&gt;.towline</code>)</li>
         </ul>
         <p>
-          Named volumes and <code>tmpfs</code> are fine. If a compose file is rejected, fix it rather than working around the policy.
-          If the stack genuinely needs a host path, ask the human: they can allow specific bind mounts (or turn the policy
-          off) under <code>compose_policy</code> in the project&apos;s <code>towline.json</code> and run{" "}
-          <code>towline refresh</code>. You cannot change the policy yourself. The other rules still apply when bind mounts
-          are allowed, and <code>..</code>, <code>~</code> and <code>{"${VAR}"}</code> sources are always rejected.
+          Named volumes and <code>tmpfs</code> are fine. A volume named <code>&lt;stack&gt;_&lt;key&gt;</code> (compose&apos;s
+          default) is always allowed. If a compose file is rejected, fix it rather than working around the policy.
+          If the stack genuinely needs a host path, an external network or another named volume, ask the human: they can
+          allow specific bind mounts (<code>allow_bind_mounts</code>), external networks (<code>allow_networks</code>; never{" "}
+          <code>host</code>, <code>bridge</code> or <code>none</code>) and volumes (<code>allow_volumes</code>), or turn the
+          policy off, under <code>compose_policy</code> in the project&apos;s <code>towline.json</code> and run{" "}
+          <code>towline refresh</code>, which passes them to <code>towline-mcp</code> as <code>-allow-bind-mounts</code>,{" "}
+          <code>-allow-networks</code>, <code>-allow-volumes</code> or <code>-compose-policy off</code>. You cannot change the
+          policy yourself. The other rules still apply when something is allowed, and <code>..</code>, <code>~</code> and{" "}
+          <code>{"${VAR}"}</code> sources are always rejected.
         </p>
 
         <h2 id="tier-system">Tier System &amp; Approval Flow</h2>
@@ -273,8 +302,12 @@ towline-mcp \\
         </p>
         <ol>
           <li>You call a tool that requires approval (e.g. <code>updateLocalStack</code> in prod)</li>
-          <li><code>towline-mcp</code> sends the request to the approval server; the response contains an <code>approvalToken</code> (the request ID). Nothing has run yet.</li>
-          <li>Tell the human what the change does, then wait until they tell you they have approved or rejected it (in the approval UI, with <code>towline approvals approve &lt;id&gt;</code>, or via a notification)</li>
+          <li><code>towline-mcp</code> sends the request to the approval server under a random request ID. The response says
+          the request is &quot;shown to your partner as&quot; a short 8-character ID, and contains an <code>approvalToken</code>,
+          which is separate from the server&apos;s request ID. Nothing has run yet.</li>
+          <li>Tell the human what the change does (and the short ID, so they can find it), then wait until they tell you they
+          have approved or rejected it (in the approval UI, with <code>towline approvals show &lt;id&gt;</code> and{" "}
+          <code>towline approvals approve &lt;id&gt;</code>, or via a notification)</li>
           <li>Re-call the same tool with identical arguments plus the <code>approvalToken</code> parameter</li>
           <li>If approved, the call executes. If still pending, nothing runs — wait for the human again; do not re-call in a loop. If rejected, the call is refused — do not retry without discussing it. Requests not decided within 30 minutes expire and are reported as rejected.</li>
         </ol>
@@ -293,6 +326,9 @@ towline-mcp \\
         <p>
           In both modes, tokens are single-use, expire after 30 minutes, and are bound to the specific tool and arguments.
           You cannot reuse a token with different arguments; call again without <code>approvalToken</code> to get a new one.
+          In human mode, a token is claimed while its re-call runs, so concurrent re-calls with the same token are rejected
+          and the operation runs at most once. Requests whose arguments are too large to show the approver (over 64 KiB,
+          not counting the compose file) are refused.
         </p>
 
         <h2 id="common-workflows">Common Agent Workflows</h2>
@@ -333,12 +369,18 @@ towline-mcp \\
 
         <h3><code>towline init &lt;project&gt;</code></h3>
         <p>Create a new project with full Portainer scaffolding.</p>
-        <pre><code>{`towline init my-project --template api --tier dev
+        <pre><code>{`towline init --template api --tier dev my-project
 
-Flags:
+Flags (must come before the project name; flags after it are rejected):
   --template  Compose template or pack (default, web-app, api, ai-stack, n8n, or a custom pack)
   --tier      Deployment tier (dev or prod, default: dev)`}</code></pre>
-        <p>Project names must match <code>{"^[a-z0-9][a-z0-9_-]{0,62}$"}</code>.</p>
+        <p>Project names must match <code>{"^[a-z0-9][a-z0-9_-]{0,62}$"}</code>. Each project has a single tier.</p>
+        <p>
+          Run inside an existing codebase, <code>init</code> adds Towline to that directory: existing agent configs are
+          merged rather than replaced, <code>CLAUDE.md</code> is appended to, and missing entries are added to{" "}
+          <code>.gitignore</code>. It refuses to run if the directory already has a <code>towline.json</code> (use{" "}
+          <code>towline refresh</code>) or if git tracks any file that would hold the project token.
+        </p>
 
         <h3><code>towline list</code></h3>
         <p>List all Towline projects on this machine.</p>
@@ -361,7 +403,8 @@ Flags:
         <pre><code>{`towline approvals setup [--mode human|agent] [--listen addr] [--url external-server]
                         [--webhook-token t] [--ntfy topic-url] [--public-url url]
 towline approvals serve            # built-in approval server, web UI at /ui (default 127.0.0.1:8787)
-towline approvals list             # these three prompt for the human's approver token
+towline approvals list             # these four prompt for the human's approver token
+towline approvals show <id>
 towline approvals approve <id>
 towline approvals reject <id>`}</code></pre>
         <p>
@@ -374,16 +417,29 @@ towline approvals reject <id>`}</code></pre>
           Brings existing projects up to date after <code>towline update</code>: rewrites the <code>towline-&lt;tier&gt;</code>{" "}
           entry in the MCP configs (keeping other servers and custom flags), moves the token into an env var, applies the
           approval mode and compose policy, fixes permissions and <code>.gitignore</code>, and moves the project team to
-          the Standard user role. The human restarts agent sessions afterwards.
+          the Standard user role. On first run it also allows the deployed stack&apos;s existing bind mounts (except
+          host-control paths such as <code>/</code>, <code>docker.sock</code> or <code>/etc</code>), external networks and
+          external or named volumes in <code>compose_policy</code>, and prints any remaining policy violations. The human
+          restarts agent sessions afterwards.
         </p>
         <pre><code>{`towline refresh --all          # every project
 towline refresh <name>...      # specific projects (or no argument inside a project)
   --keep-role                  # don't change the team role`}</code></pre>
 
+        <h3>Not yet implemented</h3>
+        <p>
+          <code>towline promote</code>, <code>towline rotate-keys</code> and <code>towline status</code> exist as commands but
+          only print &quot;not yet implemented&quot;. Don&apos;t suggest them to the human as a way to promote a project,
+          rotate its key or check its health; use <code>towline_service_health</code> for health.
+        </p>
+
         <h2 id="project-structure">Generated Project Structure</h2>
         <pre><code>{`~/projects/<name>/
 ├── .mcp.json               # MCP server configuration (0600, gitignored)
 ├── .claude/settings.json   # Claude Code permissions
+├── .cursor/mcp.json        # Cursor MCP config (0600, gitignored)
+├── .gemini/settings.json   # Gemini CLI MCP config (0600, gitignored)
+├── towline.json            # Project config: stack, tier, compose_policy (0600, gitignored)
 ├── CLAUDE.md               # Agent instructions for this project
 ├── docker-compose.yml      # From template
 ├── .env.example            # Env var template

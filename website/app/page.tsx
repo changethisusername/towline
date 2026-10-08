@@ -58,7 +58,10 @@ export default function Home() {
         <h2 className="mt-10 text-[15px] font-semibold text-text">What a project looks like</h2>
         <div className="mt-3 rounded-md border border-border bg-code-bg px-4 py-3.5">
           <pre className="text-[13px] leading-6 text-text-secondary overflow-x-auto"><code>{`~/projects/my-app/
-├── .claude/settings.json   # MCP config → launches towline-mcp
+├── .mcp.json               # MCP config → launches towline-mcp (0600, gitignored)
+├── .claude/settings.json   # Claude Code permissions
+├── .cursor/ .gemini/       # Same MCP config for Cursor and Gemini CLI
+├── towline.json            # Project config (stack, tier, compose policy)
 ├── CLAUDE.md               # Agent instructions for this project
 ├── docker-compose.yml      # From template or pack
 ├── .env.example
@@ -81,8 +84,16 @@ export default function Home() {
           the agent has full autonomy — every tool call executes immediately.
           In <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">prod</code> tier,
           reads and operational actions (health, logs, start, scale) are instant,
-          but mutations (deploy, env changes, delete, exec) require a single-use approval token.
-          The token is bound to the specific tool and arguments — it can&apos;t be reused with different parameters.
+          but mutations (deploy, env changes, domains, stop, delete, exec) need approval: from a human in Towline&apos;s
+          built-in approval server (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline approvals serve</code>, web UI and CLI),
+          or, for autonomous setups, from the agent&apos;s own explicit confirmation. Either way the agent gets a single-use
+          approval token bound to the specific tool and arguments — it can&apos;t be reused with different parameters.
+        </p>
+        <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">
+          In every tier, a compose security policy rejects stacks that could reach the host or other projects
+          (privileged mode, host bind mounts, host networking, external volumes and networks, and more).
+          You can allow specific bind mounts, networks and volumes per project in{" "}
+          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline.json</code>; the agent can&apos;t.
         </p>
 
         {/* Step by step */}
@@ -97,6 +108,7 @@ export default function Home() {
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
           Installs two binaries: <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline</code> (CLI) and <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline-mcp</code> (MCP server) to /usr/local/bin.
+          The installer verifies each archive&apos;s SHA-256 against the release checksums before extracting it.
           Run <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline help</code> to see all commands.
         </p>
 
@@ -108,27 +120,31 @@ export default function Home() {
           </code>
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
-          Interactive wizard. Asks for your Portainer URL, admin API key, and default environment ID.
-          Saves to <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">~/.towline/config.yaml</code>. Only needed once per machine.
+          Interactive wizard. Asks for your Portainer URL, admin API key, and default environment ID, verifies
+          Portainer&apos;s TLS certificate unless you say it&apos;s self-signed, and asks how prod operations are approved
+          (by a human or by the agent). Saves to <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">~/.towline/config.yaml</code>. Only needed once per machine.
         </p>
 
         <h3 className="mt-6 text-[14px] font-semibold text-text">3. Create a project</h3>
         <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
           <code className="text-[13px] text-text-secondary">
             <span className="select-none text-text-muted">$ </span>
-            <span className="text-text">towline init my-app</span>
+            <span className="text-text">towline init --template web-app my-app</span>
           </code>
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
           Creates a Portainer team, scoped API key, container stack, MCP server config,
           DevOps skill, compose file, and git repo. The project directory is ready for your agent.
+          Flags (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">--template</code>, <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">--tier dev|prod</code>) go before the project name.
+          Run inside an existing codebase, it adds Towline there instead, merging into existing agent configs; it refuses if the
+          directory already has a <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline.json</code> or git tracks a file that would hold the token.
         </p>
 
         <h3 className="mt-6 text-[14px] font-semibold text-text">4. Start your agent</h3>
         <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3">
           <code className="text-[13px] text-text-secondary">
             <span className="select-none text-text-muted">$ </span>
-            <span className="text-text">cd my-api && claude</span>
+            <span className="text-text">cd ~/projects/my-app && claude</span>
           </code>
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
@@ -142,11 +158,15 @@ export default function Home() {
         <h3 className="mt-6 text-[14px] font-semibold text-text">5. Manage projects</h3>
         <div className="mt-2 rounded-md border border-border bg-code-bg px-4 py-3.5">
           <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`towline list                 # see all projects
-towline status my-api        # stack state, tier, endpoint
-towline promote my-api       # move from dev to prod tier
-towline rotate-keys my-api   # rotate API key
-towline destroy my-api       # tear down everything`}</code></pre>
+towline refresh --all        # upgrade existing projects after towline update
+towline approvals serve      # approval server for prod (web UI at /ui)
+towline destroy my-app       # remove Portainer stack, user and team`}</code></pre>
         </div>
+        <p className="mt-2 text-[13px] text-text-muted">
+          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline promote</code>,{" "}
+          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">rotate-keys</code> and{" "}
+          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">status</code> are planned but not implemented yet.
+        </p>
 
         {/* Requirements */}
         <h2 className="mt-10 text-[15px] font-semibold text-text">Requirements</h2>
