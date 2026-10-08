@@ -1,0 +1,6 @@
+.git
+dist
+website
+docs
+*.md
+!skills/*.md
