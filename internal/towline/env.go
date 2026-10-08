@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
@@ -26,6 +27,22 @@ func shouldMaskEnvVar(name string) bool {
 		}
 	}
 	return false
+}
+
+// envVarNamePattern is the portable shell variable name syntax. Compose
+// interpolates ${NAME} only for names of this form, and a name containing
+// '=' or a newline would corrupt the stack's env file.
+var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateEnvVarName rejects names that are not valid variable names.
+func validateEnvVarName(name string) error {
+	if name == "" {
+		return fmt.Errorf("variable name must not be empty")
+	}
+	if !envVarNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid variable name %q: must match [A-Za-z_][A-Za-z0-9_]*", name)
+	}
+	return nil
 }
 
 // envVarDisplay is the JSON representation of an environment variable for display.
@@ -114,10 +131,17 @@ func (h *Handlers) HandleEnvSet() server.ToolHandlerFunc {
 			return mcp.NewToolResultErrorFromErr("invalid value parameter", err), nil
 		}
 
+		if err := validateEnvVarName(name); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
 		// Prevent setting internal vars
 		if strings.HasPrefix(name, "_TOWLINE_") {
 			return mcp.NewToolResultError("cannot set internal _TOWLINE_* variables"), nil
 		}
+
+		h.stackMu.Lock()
+		defer h.stackMu.Unlock()
 
 		// Get current stacks
 		stacks, err := h.Server.Client().GetLocalStacks()

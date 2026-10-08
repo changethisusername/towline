@@ -17,6 +17,9 @@ import (
 const (
 	execPollInterval = 500 * time.Millisecond
 	execPollTimeout  = 30 * time.Second
+	// execStartTimeout bounds the attached exec start call, which streams
+	// output until the command exits.
+	execStartTimeout = 30 * time.Second
 )
 
 // execCreateRequest is the body for Docker exec create API.
@@ -106,7 +109,16 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			return mcp.NewToolResultError("exec create returned empty ID"), nil
 		}
 
-		// Start the exec instance (attached — captures stdout/stderr)
+		// Start the exec instance (attached — captures stdout/stderr). The
+		// attached stream stays open until the command exits, so bound it:
+		// a long-running or hung command must not block the tool forever.
+		timeout := h.execTimeout
+		if timeout <= 0 {
+			timeout = execStartTimeout
+		}
+		startCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
 		startBody := `{"Detach": false, "Tty": false}`
 		outputData, err := h.proxyFn(models.DockerProxyRequestOptions{
 			EnvironmentID: h.EnvID,
@@ -114,9 +126,24 @@ func (h *Handlers) HandleExec() server.ToolHandlerFunc {
 			Path:          fmt.Sprintf("/exec/%s/start", createResp.ID),
 			Headers:       map[string]string{"Content-Type": "application/json"},
 			Body:          strings.NewReader(startBody),
+			Context:       startCtx,
 		})
 		if err != nil {
-			return mcp.NewToolResultErrorFromErr("failed to start exec instance", err), nil
+			if ctx.Err() != nil {
+				return mcp.NewToolResultError("exec cancelled: " + ctx.Err().Error()), nil
+			}
+			if startCtx.Err() == nil {
+				return mcp.NewToolResultErrorFromErr("failed to start exec instance", err), nil
+			}
+			// Timed out: report what the command printed so far.
+			result := fmt.Sprintf(
+				"Command on %s (container %s, exec %s) did not finish within %s and may still be running in the container.",
+				service, truncateID(containerID), truncateID(createResp.ID), timeout,
+			)
+			if partial := demuxDockerStream(outputData); partial != "" {
+				result += "\n\nPartial output:\n" + partial
+			}
+			return mcp.NewToolResultText(result), nil
 		}
 
 		// Demux the Docker stream to extract stdout/stderr output

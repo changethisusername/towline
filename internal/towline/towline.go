@@ -1,6 +1,9 @@
 package towline
 
 import (
+	"sync"
+	"time"
+
 	"github.com/changethisusername/towline/internal/mcp"
 	"github.com/changethisusername/towline/internal/proxy"
 	"github.com/changethisusername/towline/pkg/portainer/models"
@@ -15,6 +18,15 @@ type Handlers struct {
 	proxyFn      ProxyFunc
 	ProxyManager proxy.Manager
 	CaddyManager *proxy.CaddyManager
+
+	// stackMu serializes read-modify-write cycles on the stack (compose
+	// file and env, including deployment history). Tool calls can run
+	// concurrently, and each cycle re-submits the whole stack, so without
+	// it parallel calls silently overwrite each other's changes.
+	stackMu sync.Mutex
+
+	// execTimeout overrides execStartTimeout (tests).
+	execTimeout time.Duration
 }
 
 func NewHandlers(server *mcp.PortainerMCPServer, stackName string, envID int, proxyFn ProxyFunc) *Handlers {

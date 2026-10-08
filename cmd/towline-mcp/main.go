@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"io"
 	"os"
 	"strings"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/changethisusername/towline/internal/proxy"
 	"github.com/changethisusername/towline/internal/tooldef"
 	"github.com/changethisusername/towline/internal/towline"
-	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
@@ -175,15 +173,9 @@ func main() {
 	// Resolve stack ID at startup
 	resolveStackID(srv, stackScoping, *stackFlag)
 
-	// Helper to create proxy function for ownership checks
-	proxyFn := func(opts models.DockerProxyRequestOptions) ([]byte, error) {
-		resp, err := srv.Client().ProxyDockerRequest(opts)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		return io.ReadAll(resp.Body)
-	}
+	// Helper to create proxy function for ownership checks. HTTP error
+	// statuses come back as errors, never as data.
+	proxyFn := towline.NewProxyFunc(srv.Client().ProxyDockerRequest)
 
 	// Get environment ID from the stack, or 0 until the stack exists
 	envID := getEnvironmentID(srv, *stackFlag)

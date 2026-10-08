@@ -70,8 +70,8 @@ func TestCaddyManager_Add(t *testing.T) {
 	result, err := m.Add(caddyTestCompose, "web", "example.com", 8080)
 	require.NoError(t, err)
 
-	// Compose content should be returned unchanged
-	assert.Equal(t, caddyTestCompose, result)
+	// The service gets the project-unique alias the route dials
+	assert.Contains(t, result, "aliases:\n                    - web.myapp-dev.towline")
 
 	require.Len(t, f.posted, 1)
 	r := f.posted[0]
@@ -80,7 +80,13 @@ func TestCaddyManager_Add(t *testing.T) {
 	assert.Equal(t, []string{"example.com"}, r.Match[0].Host)
 	require.Len(t, r.Handle, 1)
 	assert.Equal(t, "reverse_proxy", r.Handle[0].Handler)
-	assert.Equal(t, "web:8080", r.Handle[0].Upstreams[0].Dial)
+	assert.Equal(t, "web.myapp-dev.towline:8080", r.Handle[0].Upstreams[0].Dial)
+
+	// List maps the alias back to the service
+	f.routes = f.posted
+	mappings, err := m.List(result)
+	require.NoError(t, err)
+	assert.Equal(t, []DomainMapping{{Service: "web", Domain: "example.com", Port: 8080, Method: BackendCaddy}}, mappings)
 }
 
 func TestCaddyManager_Add_Rejects(t *testing.T) {
