@@ -134,7 +134,11 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 				return next(ctx, request)
 			case approval.StatusRejected:
 				gate.Store.Consume(token)
-				return mcp.NewToolResultError(fmt.Sprintf("Production operation %q was rejected by a human approver. Do not retry without discussing it with your partner.", toolName)), nil
+				what := "Production operation"
+				if gate.ApprovalURL != "" {
+					what = "Operation" // remote gateway: dev projects are gated too
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("%s %q was rejected by a human approver. Do not retry without discussing it with your partner.", what, toolName)), nil
 			default:
 				gate.Store.Release(token)
 				return mcp.NewToolResultText(fmt.Sprintf(

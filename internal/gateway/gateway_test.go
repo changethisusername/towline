@@ -590,7 +590,13 @@ func TestOwnerUI(t *testing.T) {
 	if resp := post("/ui/connections", create); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("create without csrf: %d", resp.StatusCode)
 	}
+	nonceRe := regexp.MustCompile(`name="nonce" value="([0-9a-f]+)"`)
+	nonce := nonceRe.FindStringSubmatch(string(page))
+	if nonce == nil {
+		t.Fatal("no form nonce on dashboard")
+	}
 	create.Set("csrf", csrf[1])
+	create.Set("nonce", nonce[1])
 	resp = post("/ui/connections", create)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -601,9 +607,21 @@ func TestOwnerUI(t *testing.T) {
 	if s := rawStatus(t, tg.url+"/mcp", secret, nil); s != http.StatusOK {
 		t.Fatalf("created token: %d", s)
 	}
-	// Unknown projects are refused.
+	// Reloading the result page doesn't create a second connection.
+	resp = post("/ui/connections", create)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || strings.Contains(string(body), "twl_ct_") {
+		t.Fatalf("resubmitted form: %d", resp.StatusCode)
+	}
+	// Unknown projects are refused, and the form keeps what was entered.
+	create.Set("nonce", nonceRe.FindStringSubmatch(string(body))[1])
 	create.Set("project", "gamma")
-	if resp := post("/ui/connections", create); resp.StatusCode != http.StatusBadRequest {
+	create.Set("name", "my laptop")
+	resp = post("/ui/connections", create)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), `value="my laptop"`) || !strings.Contains(string(body), `id="m-token" checked`) {
 		t.Fatalf("unknown project: %d", resp.StatusCode)
 	}
 }

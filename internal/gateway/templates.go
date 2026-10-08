@@ -56,9 +56,12 @@ var pageTemplates = template.Must(template.New("pages").Funcs(template.FuncMap{
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Towline gateway</title>
 <style>
-:root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e3de; --ok:#1f7a3d; --no:#b42318; --warn:#9a6700; }
+:root { color-scheme: light dark; --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e3de; --ok:#1f7a3d; --no:#b42318; --warn:#9a6700; }
 @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ecece8; --muted:#9a9a93; --card:#20201e; --line:#33332f; --ok:#4cc27a; --no:#f07167; --warn:#e3b341; } }
+@media (prefers-color-scheme: dark) { button.primary { color:#0d1f14; } }
 * { box-sizing: border-box; }
+a { color: var(--ok); }
+fieldset { border:0; padding:0; margin:0; min-width:0; } legend { font-weight:600; padding:0; margin:10px 0 4px; }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
 h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 13px; margin: 28px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -127,20 +130,25 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 <div class="card">
 <form method="post" action="/ui/connections">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="nonce" value="{{.Nonce}}">
 <label for="name">Name</label>
-<input type="text" id="name" name="name" maxlength="64" placeholder="e.g. Claude on my phone" required>
-<label>Projects</label>
-{{range .Projects}}<div class="choice"><input type="checkbox" name="project" value="{{.Name}}" id="p-{{.Name}}"><label class="choice" for="p-{{.Name}}">{{.Name}} <span class="meta">{{.Tier}} · approval {{.Approval}}</span></label></div>{{end}}
-<label>Access</label>
-<div class="choice"><input type="radio" name="scope" value="read" id="s-read" checked><label class="choice" for="s-read">Read only: health, logs, env, stack file</label></div>
-<div class="choice"><input type="radio" name="scope" value="deploy" id="s-deploy"><label class="choice" for="s-deploy">Deploy: also change stacks, env, domains, exec (gated changes wait for your approval here)</label></div>
+<input type="text" id="name" name="name" maxlength="64" placeholder="e.g. Claude on my phone" value="{{.Form.Name}}" required>
+<fieldset><legend>Projects</legend>
+{{range .Projects}}<div class="choice"><input type="checkbox" name="project" value="{{.Name}}" id="p-{{.Name}}"{{if $.Form.Has .Name}} checked{{end}}><label class="choice" for="p-{{.Name}}">{{.Name}} <span class="meta">{{.Tier}} · approval {{.Approval}}</span></label></div>{{end}}
+</fieldset>
+<fieldset><legend>Access</legend>
+<div class="choice"><input type="radio" name="scope" value="read" id="s-read"{{if ne .Form.Scope "deploy"}} checked{{end}}><label class="choice" for="s-read">Read only: health, logs, env, stack file</label></div>
+<div class="choice"><input type="radio" name="scope" value="deploy" id="s-deploy"{{if eq .Form.Scope "deploy"}} checked{{end}}><label class="choice" for="s-deploy">Deploy: also change stacks, env, domains, exec (gated changes wait for your approval here)</label></div>
 <div class="warn">An app that can deploy and reads untrusted content (web pages, logs, email) can be tricked into deploying things. Give deploy access to as few projects as you can, and read approval requests carefully.</div>
-<label>How the app connects</label>
-<div class="choice"><input type="radio" name="method" value="app" id="m-app" checked><label class="choice" for="m-app">App sign-in: Claude, ChatGPT/Codex and other apps that add a connector by URL. Opens a 10-minute window; you approve the app on this gateway when it signs in.</label></div>
-<div class="choice"><input type="radio" name="method" value="oauth" id="m-oauth"><label class="choice" for="m-oauth">Client ID and secret: for apps where you can enter an OAuth client ID and secret (Claude custom connector, advanced settings).</label></div>
-<div class="choice"><input type="radio" name="method" value="token" id="m-token"><label class="choice" for="m-token">Header token: for clients that send an Authorization header (Claude Code, Cursor, scripts).</label></div>
-<details><summary class="meta">Extra redirect URIs (client ID and secret only)</summary>
-<textarea name="redirect_uris" rows="2" placeholder="One per line. Claude's callbacks are always included."></textarea>
+</fieldset>
+<fieldset><legend>How the app connects</legend>
+<div class="choice"><input type="radio" name="method" value="app" id="m-app"{{if or (eq .Form.Method "app") (eq .Form.Method "")}} checked{{end}}><label class="choice" for="m-app">App sign-in: Claude, ChatGPT/Codex and other apps that add a connector by URL. Opens a 10-minute window; you approve the app on this gateway when it signs in.</label></div>
+<div class="choice"><input type="radio" name="method" value="oauth" id="m-oauth"{{if eq .Form.Method "oauth"}} checked{{end}}><label class="choice" for="m-oauth">Client ID and secret: for apps where you can enter an OAuth client ID and secret (Claude custom connector, advanced settings).</label></div>
+<div class="choice"><input type="radio" name="method" value="token" id="m-token"{{if eq .Form.Method "token"}} checked{{end}}><label class="choice" for="m-token">Header token: for clients that send an Authorization header (Claude Code, Cursor, scripts).</label></div>
+</fieldset>
+<details{{if .Form.Redirects}} open{{end}}><summary class="meta">Extra redirect URIs (client ID and secret only)</summary>
+<label for="redirect_uris">Extra redirect URIs</label>
+<textarea id="redirect_uris" name="redirect_uris" rows="2" placeholder="One per line. Claude's and ChatGPT's callbacks are always included.">{{.Form.Redirects}}</textarea>
 </details>
 <div class="actions"><button class="primary">Create</button></div>
 </form>
@@ -225,7 +233,7 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 {{else}}
 {{if .Pairings}}
 <label for="pairing">Sign-in window</label>
-<select id="pairing" name="pairing">{{range .Pairings}}<option value="{{.ID}}">{{.Name}}: {{.Scope}} on {{range $i, $p := .Projects}}{{if $i}}, {{end}}{{$p}}{{end}} (closes in {{until .ExpiresAt}})</option>{{end}}</select>
+<select id="pairing" name="pairing" required>{{if gt (len .Pairings) 1}}<option value="" disabled{{if not $.Selected}} selected{{end}}>Choose the window you opened for this app</option>{{end}}{{range .Pairings}}<option value="{{.ID}}"{{if eq .ID $.Selected}} selected{{end}}>{{.Name}}: {{.Scope}} on {{range $i, $p := .Projects}}{{if $i}}, {{end}}{{$p}}{{end}} (closes in {{until .ExpiresAt}})</option>{{end}}</select>
 {{else}}
 <div class="msg">No sign-in window is open. Open one on the gateway page first.</div>
 {{end}}

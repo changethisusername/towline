@@ -51,7 +51,13 @@ type remoteConfig struct {
 	// owner's approval) or "prod".
 	Approval string `yaml:"approval,omitempty"`
 	NtfyURL  string `yaml:"ntfy_url,omitempty"`
+	// ComposeDir, when set, is where the gateway's compose file is written
+	// instead of deploying through Portainer; later commands reuse it.
+	ComposeDir string `yaml:"compose_dir,omitempty"`
 }
+
+// tunnelTokenPattern is the shape of a Cloudflare Tunnel token (base64).
+var tunnelTokenPattern = regexp.MustCompile(`^[A-Za-z0-9+/=_-]{20,}$`)
 
 func remoteConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -177,7 +183,11 @@ func runRemoteSetup(args []string) error {
 	case *noTunnel:
 		rc.TunnelToken = ""
 	case token != "":
-		rc.TunnelToken = strings.TrimSpace(token)
+		t := strings.TrimSpace(token)
+		if !tunnelTokenPattern.MatchString(t) {
+			return fmt.Errorf("the tunnel token doesn't look like a Cloudflare Tunnel token (copy the long string after --token in the dashboard's install command)")
+		}
+		rc.TunnelToken = t
 	case rc.TunnelToken == "":
 		return fmt.Errorf("a Cloudflare Tunnel token is required (--tunnel-token or TUNNEL_TOKEN), or pass --no-tunnel with --port to use your own reverse proxy")
 	}
@@ -211,17 +221,12 @@ func runRemoteSetup(args []string) error {
 		rc.NtfyURL = *ntfy
 	}
 
-	dirs, err := projectDirs(cfg, names, *all)
-	if err != nil {
-		return err
-	}
-	for _, d := range dirs {
-		if !slices.Contains(rc.Projects, d) {
-			rc.Projects = append(rc.Projects, d)
+	if *composeDir != "" {
+		abs, err := filepath.Abs(*composeDir)
+		if err != nil {
+			return err
 		}
-	}
-	if len(rc.Projects) == 0 {
-		return fmt.Errorf("name the projects to serve, or pass --all")
+		rc.ComposeDir = abs
 	}
 
 	ownerToken := ""
@@ -230,10 +235,36 @@ func runRemoteSetup(args []string) error {
 		rc.OwnerTokenHash = approval.HashToken(ownerToken)
 	}
 
-	// Check the result builds a valid gateway config before saving.
-	if _, err := buildGatewayConfig(cfg, rc); err != nil {
+	dirs, err := projectDirs(cfg, names, *all)
+	if err != nil {
 		return err
 	}
+	for _, d := range dirs {
+		if slices.Contains(rc.Projects, d) {
+			continue
+		}
+		if *all {
+			// With --all, a project that can't be served is skipped
+			// rather than failing the whole setup.
+			probe := *rc
+			probe.Projects = []string{d}
+			if _, err := buildGatewayConfig(cfg, &probe); err != nil {
+				fmt.Printf("Skipping %s: %v\n", filepath.Base(d), err)
+				continue
+			}
+		}
+		rc.Projects = append(rc.Projects, d)
+	}
+	if len(rc.Projects) == 0 {
+		return fmt.Errorf("name the projects to serve, or pass --all")
+	}
+
+	// Check the result builds a valid gateway config before saving.
+	gc, err := buildGatewayConfig(cfg, rc)
+	if err != nil {
+		return err
+	}
+	rc.URL = gc.PublicURL // canonical: lowercase host, no default port
 	if err := saveRemoteConfig(rc); err != nil {
 		return err
 	}
@@ -249,12 +280,12 @@ func runRemoteSetup(args []string) error {
 		fmt.Println("Run 'towline remote deploy' when you're ready.")
 		return nil
 	}
-	return deployRemote(cfg, rc, *composeDir)
+	return deployRemote(cfg, rc, rc.ComposeDir)
 }
 
 func runRemoteDeploy(args []string) error {
 	fs := flag.NewFlagSet("remote deploy", flag.ContinueOnError)
-	composeDir := fs.String("compose-dir", "", "Write docker-compose.yml and .env here instead of deploying through Portainer")
+	composeDir := fs.String("compose-dir", "", "Write docker-compose.yml and .env here instead of deploying through Portainer (remembered)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -266,7 +297,17 @@ func runRemoteDeploy(args []string) error {
 	if err != nil {
 		return err
 	}
-	return deployRemote(cfg, rc, *composeDir)
+	if *composeDir != "" {
+		abs, err := filepath.Abs(*composeDir)
+		if err != nil {
+			return err
+		}
+		rc.ComposeDir = abs
+		if err := saveRemoteConfig(rc); err != nil {
+			return err
+		}
+	}
+	return deployRemote(cfg, rc, rc.ComposeDir)
 }
 
 func runRemoteAddRemove(args []string, add bool) error {
@@ -323,7 +364,7 @@ func runRemoteAddRemove(args []string, add bool) error {
 	if *noDeploy {
 		return nil
 	}
-	return deployRemote(cfg, rc, "")
+	return deployRemote(cfg, rc, rc.ComposeDir)
 }
 
 func runRemoteOwnerToken(args []string) error {
@@ -344,7 +385,7 @@ func runRemoteOwnerToken(args []string) error {
 	rc.OwnerTokenHash = approval.HashToken(token)
 	// Deploy first: if it fails, the old token keeps working and the new
 	// one is never shown.
-	if err := deployRemote(cfg, rc, ""); err != nil {
+	if err := deployRemote(cfg, rc, rc.ComposeDir); err != nil {
 		rc.OwnerTokenHash = oldHash
 		return fmt.Errorf("owner token not changed: %w", err)
 	}
@@ -370,6 +411,18 @@ func dropFromRemote(projectDir string) {
 	n := len(rc.Projects)
 	rc.Projects = slices.DeleteFunc(rc.Projects, func(p string) bool { return p == dir || p == projectDir })
 	if len(rc.Projects) == n {
+		return
+	}
+	if len(rc.Projects) == 0 {
+		if err := saveRemoteConfig(rc); err != nil {
+			fmt.Printf("Warning: failed to update the remote gateway config: %v\n", err)
+			return
+		}
+		where := "delete the " + remoteStackName + " stack in Portainer"
+		if rc.ComposeDir != "" {
+			where = "run 'docker compose down' in " + rc.ComposeDir
+		}
+		fmt.Printf("The remote gateway now serves no projects; %s to stop it.\n", where)
 		return
 	}
 	if err := saveRemoteConfig(rc); err != nil {

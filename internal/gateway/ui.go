@@ -24,6 +24,9 @@ type ownerUI struct {
 	g        *Gateway
 	mu       sync.Mutex
 	sessions map[string]ownerSession
+	// nonces are one-time tokens on the create form, so reloading the
+	// result page doesn't create a second connection.
+	nonces map[string]time.Time
 }
 
 type ownerSession struct {
@@ -32,7 +35,7 @@ type ownerSession struct {
 }
 
 func newOwnerUI(g *Gateway) *ownerUI {
-	return &ownerUI{g: g, sessions: map[string]ownerSession{}}
+	return &ownerUI{g: g, sessions: map[string]ownerSession{}, nonces: map[string]time.Time{}}
 }
 
 func (u *ownerUI) register(mux *http.ServeMux) {
@@ -177,10 +180,59 @@ type dashboardData struct {
 	Recent      []approval.Record
 	// ConnNames maps connection ids to names, for approval requests.
 	ConnNames map[string]string
+	// Nonce is the create form's one-time token.
+	Nonce string
+	// Form holds what was posted when creating failed, so it can be fixed
+	// instead of re-entered.
+	Form createForm
+}
+
+type createForm struct {
+	Name, Scope, Method, Redirects string
+	Projects                       map[string]bool
+}
+
+func (f createForm) Has(p string) bool { return f.Projects[p] }
+
+func (u *ownerUI) newNonce() string {
+	n := randomHex(16)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	now := u.g.now()
+	for k, exp := range u.nonces {
+		if now.After(exp) {
+			delete(u.nonces, k)
+		}
+	}
+	if len(u.nonces) < 500 {
+		u.nonces[n] = now.Add(ownerSessionTTL)
+	}
+	return n
+}
+
+func (u *ownerUI) useNonce(n string) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	exp, ok := u.nonces[n]
+	delete(u.nonces, n)
+	return ok && !u.g.now().After(exp)
+}
+
+// createFailed shows the dashboard again with the error and the posted
+// values.
+func (u *ownerUI) createFailed(w http.ResponseWriter, r *http.Request, s ownerSession, msg string) {
+	d := u.dashboard(s, msg)
+	f := r.PostForm
+	d.Form = createForm{Name: f.Get("name"), Scope: f.Get("scope"), Method: f.Get("method"), Redirects: f.Get("redirect_uris"), Projects: map[string]bool{}}
+	for _, p := range f["project"] {
+		d.Form.Projects[p] = true
+	}
+	u.render(w, http.StatusBadRequest, "dashboard", d)
 }
 
 func (u *ownerUI) dashboard(s ownerSession, msg string) dashboardData {
-	d := dashboardData{CSRF: s.csrf, Message: msg, PublicURL: u.g.cfg.PublicURL, MCPURL: u.g.resourceFor("")}
+	d := dashboardData{CSRF: s.csrf, Message: msg, PublicURL: u.g.cfg.PublicURL, MCPURL: u.g.resourceFor(""), Nonce: u.newNonce(),
+		Form: createForm{Scope: "read", Method: "app"}}
 	for _, p := range u.g.cfg.Projects {
 		d.Projects = append(d.Projects, projectView{Name: p.Name, Stack: p.Stack, Tier: p.Tier, Approval: p.Approval})
 	}
@@ -216,10 +268,15 @@ func (u *ownerUI) handleCreate(w http.ResponseWriter, r *http.Request, s ownerSe
 	projects := f["project"]
 	method := f.Get("method")
 
+	if !u.useNonce(f.Get("nonce")) {
+		// A reload or a second submit of the same form.
+		u.render(w, http.StatusConflict, "dashboard", u.dashboard(s, "That form was already submitted. Check the connections below before creating another."))
+		return
+	}
 	if method == "app" {
 		p, err := u.g.store.OpenPairing(f.Get("name"), projects, scope, known)
 		if err != nil {
-			u.render(w, http.StatusBadRequest, "dashboard", u.dashboard(s, err.Error()))
+			u.createFailed(w, r, s, err.Error())
 			return
 		}
 		u.g.audit.Info().Str("event", "pairing_opened").Str("pairing", p.ID).Strs("projects", p.Projects).Str("scope", string(p.Scope)).Msg("")
@@ -230,7 +287,7 @@ func (u *ownerUI) handleCreate(w http.ResponseWriter, r *http.Request, s ownerSe
 	if method == "oauth" {
 		kind = KindOAuth
 	} else if method != "token" {
-		u.render(w, http.StatusBadRequest, "dashboard", u.dashboard(s, "Choose how the app connects."))
+		u.createFailed(w, r, s, "Choose how the app connects.")
 		return
 	}
 	var redirects []string
@@ -239,7 +296,7 @@ func (u *ownerUI) handleCreate(w http.ResponseWriter, r *http.Request, s ownerSe
 	}
 	c, err := u.g.store.CreateConnection(NewConnectionRequest{Name: f.Get("name"), Kind: kind, Projects: projects, Scope: scope, RedirectURIs: redirects}, known)
 	if err != nil {
-		u.render(w, http.StatusBadRequest, "dashboard", u.dashboard(s, err.Error()))
+		u.createFailed(w, r, s, err.Error())
 		return
 	}
 	u.g.audit.Info().Str("event", "connection_created").Str("connection", c.ID).Str("kind", c.Kind).Strs("projects", c.Projects).Str("scope", string(c.Scope)).Msg("")

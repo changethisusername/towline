@@ -714,10 +714,15 @@ type consentData struct {
 	Message    string
 	Public     bool
 	Next       string
+	// Selected is the pairing chosen in a post that is shown again.
+	Selected string
 }
 
 func (g *Gateway) renderConsent(w http.ResponseWriter, r *http.Request, req *authzRequest, conn *Connection, msg string) {
 	d := consentData{Request: req, ClientName: req.ClientName, LoggedIn: g.ui.loggedIn(r), Message: msg}
+	if r.Method == http.MethodPost {
+		d.Selected = r.PostForm.Get("pairing")
+	}
 	if u, err := url.Parse(req.RedirectURI); err == nil {
 		d.Redirect = cspSource(u)
 		// Chrome checks form-action of the submitting page against every

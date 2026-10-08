@@ -52,7 +52,7 @@ func TestBuildGatewayConfig(t *testing.T) {
 	cfg := remoteTestEnv(t, "https://localhost:9443")
 	dirs, err := projectDirs(cfg, nil, true)
 	require.NoError(t, err)
-	rc := &remoteConfig{URL: "https://mcp.example.com", Projects: dirs, OwnerTokenHash: strings.Repeat("ab", 32), TunnelToken: "tun", Approval: gateway.ApprovalAlways}
+	rc := &remoteConfig{URL: "https://mcp.example.com", Projects: dirs, OwnerTokenHash: strings.Repeat("ab", 32), TunnelToken: "eyJhIjoidGVzdCJ9tunneltoken00", Approval: gateway.ApprovalAlways}
 	gc, err := buildGatewayConfig(cfg, rc)
 	require.NoError(t, err)
 	require.Len(t, gc.Projects, 2)
@@ -144,17 +144,17 @@ func TestRemoteSetupDeploysThroughPortainer(t *testing.T) {
 	defer srv.Close()
 	remoteTestEnv(t, srv.URL)
 
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun_secret", "shop", "blog"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidHVuX3NlY3JldCJ9tunnelsecret", "shop", "blog"}))
 	require.Len(t, fp.created, 1)
 	assert.Equal(t, remoteStackName, fp.created[0]["name"])
-	assert.NotContains(t, fp.created[0]["stackFileContent"], "tun_secret")
+	assert.NotContains(t, fp.created[0]["stackFileContent"], "eyJhIjoidHVuX3NlY3JldCJ9tunnelsecret")
 
 	env := map[string]string{}
 	for _, e := range fp.created[0]["env"].([]any) {
 		m := e.(map[string]any)
 		env[m["name"].(string)] = m["value"].(string)
 	}
-	assert.Equal(t, "tun_secret", env["TUNNEL_TOKEN"])
+	assert.Equal(t, "eyJhIjoidHVuX3NlY3JldCJ9tunnelsecret", env["TUNNEL_TOKEN"])
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(env[gateway.ConfigEnvVar], "base64:"))
 	require.NoError(t, err)
 	gc, err := gateway.ParseConfig(raw)
@@ -178,7 +178,7 @@ func TestRemoteSetupDeploysThroughPortainer(t *testing.T) {
 func TestRemoteComposeDir(t *testing.T) {
 	remoteTestEnv(t, "https://portainer.lan:9443")
 	out := filepath.Join(t.TempDir(), "gw")
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--compose-dir", out, "--all"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "--all"}))
 	info, err := os.Stat(filepath.Join(out, ".env"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
@@ -198,7 +198,7 @@ func TestRemoteSetupNeedsTunnelOrPort(t *testing.T) {
 
 func TestRemoteRemoveWorksAfterProjectDirIsGone(t *testing.T) {
 	cfg := remoteTestEnv(t, "https://portainer.lan:9443")
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "shop", "blog"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--no-deploy", "shop", "blog"}))
 	require.NoError(t, os.RemoveAll(filepath.Join(cfg.ProjectsDir, "blog")))
 	require.NoError(t, runRemote([]string{"remove", "--no-deploy", "blog"}))
 	rc, err := loadRemoteConfig()
@@ -210,8 +210,8 @@ func TestRemoteRemoveWorksAfterProjectDirIsGone(t *testing.T) {
 
 func TestRemoteSetupKeepsApprovalPolicy(t *testing.T) {
 	remoteTestEnv(t, "https://portainer.lan:9443")
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--approval", "prod", "--no-deploy", "shop"}))
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "blog"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--approval", "prod", "--no-deploy", "shop"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--no-deploy", "blog"}))
 	rc, err := loadRemoteConfig()
 	require.NoError(t, err)
 	assert.Equal(t, gateway.ApprovalProd, rc.Approval)
@@ -220,9 +220,43 @@ func TestRemoteSetupKeepsApprovalPolicy(t *testing.T) {
 
 func TestRemoteOwnerTokenUnchangedWhenDeployFails(t *testing.T) {
 	remoteTestEnv(t, "http://127.0.0.1:1")
-	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "tun", "--no-deploy", "shop"}))
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--no-deploy", "shop"}))
 	before, _ := loadRemoteConfig()
 	assert.Error(t, runRemote([]string{"owner-token"}))
 	after, _ := loadRemoteConfig()
 	assert.Equal(t, before.OwnerTokenHash, after.OwnerTokenHash)
+}
+
+func TestRemoteComposeDirIsRemembered(t *testing.T) {
+	remoteTestEnv(t, "http://127.0.0.1:1") // Portainer unreachable: any Portainer deploy fails
+	out := filepath.Join(t.TempDir(), "gw")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://MCP.Example.com:443/", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "shop"}))
+	rc, err := loadRemoteConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "https://mcp.example.com", rc.URL)
+	require.NoError(t, runRemote([]string{"add", "blog"}), "add must write the compose dir again, not deploy through Portainer")
+	require.NoError(t, runRemote([]string{"owner-token"}))
+	before, _ := os.Stat(filepath.Join(out, ".env"))
+	require.NoError(t, runRemote([]string{"deploy"}))
+	after, _ := os.Stat(filepath.Join(out, ".env"))
+	assert.False(t, after.ModTime().Before(before.ModTime()))
+}
+
+func TestRemoteRejectsMalformedTunnelToken(t *testing.T) {
+	remoteTestEnv(t, "https://portainer.lan:9443")
+	for _, tok := range []string{"abc", "eyJhIjoidGVzdCJ9tunnel\nINJECTED=1"} {
+		assert.Error(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", tok, "--no-deploy", "shop"}), tok)
+	}
+}
+
+func TestRemoteSetupAllSkipsUnservableProjects(t *testing.T) {
+	cfg := remoteTestEnv(t, "https://portainer.lan:9443")
+	writeProject(t, cfg.ProjectsDir, "verylongprojectnamethatistoolong", map[string]any{
+		"stack_name": "verylongprojectnamethatistoolong-dev", "tier": "dev",
+		"mcp_args": map[string]any{"token": "ptr_x", "stack": "verylongprojectnamethatistoolong-dev", "tier": "dev"},
+	})
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--no-deploy", "--all"}))
+	rc, err := loadRemoteConfig()
+	require.NoError(t, err)
+	assert.Len(t, rc.Projects, 2)
 }

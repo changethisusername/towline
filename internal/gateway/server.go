@@ -371,7 +371,16 @@ func Main(args []string) error {
 func healthcheck(args []string) error {
 	addr := "127.0.0.1:8080"
 	if len(args) > 0 {
+		if strings.HasPrefix(args[0], "-") {
+			fmt.Println("usage: towline-mcp gateway healthcheck [host:port]")
+			return nil
+		}
 		addr = args[0]
+	} else if cfg, err := LoadConfig(""); err == nil {
+		// Follow a non-default listen address from the config.
+		if _, port, err := net.SplitHostPort(cfg.Listen); err == nil && port != "" {
+			addr = net.JoinHostPort("127.0.0.1", port)
+		}
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get("http://" + addr + "/healthz")

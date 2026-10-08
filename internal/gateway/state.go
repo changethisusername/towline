@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/changethisusername/towline/internal/middleware"
 )
@@ -333,7 +334,7 @@ type CreatedConnection struct {
 // validateGrant checks a connection's name, projects and scope.
 func validateGrant(rawName string, projects []string, scope middleware.Scope, knownProject func(string) bool) (string, []string, error) {
 	name := strings.TrimSpace(rawName)
-	if name == "" || len(name) > 64 || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	if name == "" || utf8.RuneCountInString(name) > 64 || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "", nil, errors.New("name must be 1-64 printable characters")
 	}
 	if _, err := middleware.ParseScope(string(scope)); err != nil {

@@ -11,7 +11,7 @@ What you get:
 
 - **Connections you create in a web page.** Each one names the projects it can use and whether it can only read or can also deploy. Revoke it any time; the next request fails.
 - **The same safety layers as local Towline.** Each project keeps its own team-scoped Portainer key, stack scoping, compose security policy and container ownership checks.
-- **Your approval for changes.** By default every deploy, configuration change, exec or destructive action made through the gateway waits for you on the gateway page, on dev projects too. Turn on ntfy to get a push notification.
+- **Your approval for changes.** By default every deploy, configuration change, exec or destructive action made through the gateway waits for you on the gateway page, on dev projects too. Pass `--ntfy-url https://ntfy.sh/<your-topic>` to `towline remote setup` to get a push notification.
 - **Guidance for agents without files.** Apps get a `towline_guide` tool and server instructions, because they can't read `CLAUDE.md` or skills from disk.
 - **An audit log.** Every tool call and sign-in is logged as JSON to the gateway's output. Tool arguments are never logged.
 
@@ -40,6 +40,8 @@ export TUNNEL_TOKEN=<token>   # or --tunnel-token, which shows up in shell histo
 towline remote setup --url https://mcp.example.com shop blog
 #   or --all to serve every project
 ```
+
+Projects are named by their directory in your projects folder (`shop`, `blog`). On the gateway they appear by stack name (`shop-prod`, `blog-dev`): that is the name in `/p/<project>/mcp` and in tool names like `shop-prod__towline_service_health`.
 
 This:
 
@@ -88,7 +90,7 @@ Approval tokens are bound to the connection that asked, the tool and the exact a
 towline remote status          # configuration and a health check
 towline remote add api         # serve another project (redeploys)
 towline remote remove blog     # stop serving a project (redeploys)
-towline remote deploy          # redeploy, e.g. after 'towline rotate-keys' or editing compose_policy
+towline remote deploy          # redeploy, e.g. after changing a project's key or compose_policy
 towline remote owner-token     # issue a new owner token (redeploys)
 ```
 
@@ -100,7 +102,7 @@ Connections and OAuth grants live in the gateway's `gateway-data` volume and sur
 
 - **Blast radius.** The gateway holds the Portainer keys of the projects it serves, never the admin key. A gateway compromise reaches those projects only.
 - **Prompt injection.** An app that can deploy and also reads untrusted content (web pages, email, logs) can be steered into asking for changes. Prefer read-only connections, give deploy access to as few projects as possible, and read approval requests before approving. Multi-project deploy connections are flagged on the page for this reason.
-- **Credentials.** Secrets are shown once and stored only as SHA-256 hashes. Every credential kind has its own prefix (`twl_ct_` header token, `twl_cs_` client secret, `twl_at_`/`twl_rt_` OAuth tokens), and each is accepted only where it belongs. Access tokens last 1 hour and are bound to the URL they were issued for. Refresh tokens last 30 days.
+- **Credentials.** Secrets are shown once and stored only as SHA-256 hashes. Every credential kind has its own prefix (`twl_ct_` header token, `twl_cs_` client secret, `twl_at_`/`twl_rt_` OAuth tokens), and each is accepted only where it belongs. Access tokens last 1 hour. A token issued for `/mcp` works there and on `/p/<project>/mcp` for the connection's own projects; a token issued for one project's URL works only there. Refresh tokens last 30 days.
 - **Registration** of new apps is only open while you have a sign-in window open. A registered app gets nothing until you approve it with the owner token.
 - **The container** runs as a non-root user on a read-only filesystem with all capabilities dropped and no published port; only `cloudflared` talks to the outside.
 - **Host checks.** Requests must be addressed to your public hostname, and browser requests from other origins are refused. That includes MCP calls from browser-based tools such as MCP Inspector in browser mode. Use the header-token method from a non-browser client instead.

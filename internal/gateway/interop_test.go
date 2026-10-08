@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -209,5 +211,75 @@ func TestSlowToolCallsAnswerBeforeTheTunnelTimesOut(t *testing.T) {
 	res, done, err := runDetached(context.Background(), mcp.CallToolRequest{}, quick, time.Second)
 	if !done || err != nil || res == nil {
 		t.Fatalf("quick call: %v %v %v", res, done, err)
+	}
+}
+
+func TestConsentWithSeveralWindowsHasNoDefault(t *testing.T) {
+	tg := newTestGateway(t)
+	known := func(n string) bool { _, ok := tg.cfg.Project(n); return ok }
+	if _, err := tg.store.OpenPairing("decoy", []string{"alpha"}, middleware.ScopeRead, known); err != nil {
+		t.Fatal(err)
+	}
+	laptop, err := tg.store.OpenPairing("laptop", []string{"beta"}, middleware.ScopeDeploy, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID, _, err := tg.store.registerClient("Claude", []string{"https://claude.ai/api/mcp/auth_callback"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := noRedirectClient()
+	if resp, _ := postForm(t, owner, tg.url+"/ui/login", url.Values{"token": {testOwnerToken}}, "", ""); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("owner login: %d", resp.StatusCode)
+	}
+	_, challenge := pkce()
+	resp, err := owner.Get(authorizeURL(tg.url, clientID, "https://claude.ai/api/mcp/auth_callback", challenge, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(page), `<option value="" disabled selected>`) {
+		t.Fatal("with two windows open, one is preselected")
+	}
+	reqID := hiddenRequest.FindStringSubmatch(string(page))[1]
+	// Approving without choosing a window approves nothing; the choice made
+	// in a post is kept when the page is shown again.
+	form := url.Values{"request": {reqID}, "decision": {"approve"}}
+	req, _ := http.NewRequest("POST", tg.url+"/oauth/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", tg.url)
+	resp, err = owner.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.Header.Get("Location") != "" {
+		t.Fatal("approved without a chosen window")
+	}
+	r, _ := http.NewRequest("POST", "/", strings.NewReader("pairing="+laptop.ID))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	u, _ := url.Parse(tg.url)
+	for _, c := range owner.Jar.Cookies(u) {
+		r.AddCookie(c)
+	}
+	_ = r.ParseForm()
+	rec := httptest.NewRecorder()
+	tg.renderConsent(rec, r, &authzRequest{ID: "x", RedirectURI: "https://claude.ai/cb"}, nil, "Wrong owner token.")
+	if !strings.Contains(rec.Body.String(), `value="`+laptop.ID+`" selected`) {
+		t.Fatal("chosen window not kept after an error")
+	}
+}
+
+func TestConnectionNamesCountCharacters(t *testing.T) {
+	tg := newTestGateway(t)
+	known := func(n string) bool { _, ok := tg.cfg.Project(n); return ok }
+	for _, name := range []string{strings.Repeat("я", 64), strings.Repeat("🚀", 30)} {
+		if _, err := tg.store.CreateConnection(NewConnectionRequest{Name: name, Kind: KindToken, Projects: []string{"alpha"}, Scope: middleware.ScopeRead}, known); err != nil {
+			t.Fatalf("%d-character name refused: %v", len([]rune(name)), err)
+		}
+	}
+	if _, err := tg.store.CreateConnection(NewConnectionRequest{Name: strings.Repeat("я", 65), Kind: KindToken, Projects: []string{"alpha"}, Scope: middleware.ScopeRead}, known); err == nil {
+		t.Fatal("65-character name accepted")
 	}
 }
