@@ -22,6 +22,15 @@ func newAdminAPI(cfg *config.GlobalConfig) *config.PortainerAPI {
 	return api
 }
 
+// newProjectAPI returns a Portainer client authenticated with a project's
+// own (team-scoped) API token rather than the admin key.
+func newProjectAPI(cfg *config.GlobalConfig, token string) *config.PortainerAPI {
+	skip, _ := cfg.InsecureTLS()
+	api := config.NewPortainerAPI(cfg.PortainerURL, skip)
+	api.Token = token
+	return api
+}
+
 // projectTemplateData builds the template data for a project's agent
 // configs from the global and project configuration.
 func projectTemplateData(cfg *config.GlobalConfig, projectName string, pc *config.ProjectConfig, apiToken, mcpBinaryPath string) TemplateData {

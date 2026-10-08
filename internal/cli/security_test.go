@@ -31,6 +31,8 @@ type fakePortainer struct {
 	requests     []string
 	// authTokens records the auth header used for each DELETE
 	deleteAuth []string
+	// stackReader, if set, is the only API key allowed to GET stacks
+	stackReader string
 }
 
 func newFakePortainer() *fakePortainer {
@@ -46,6 +48,11 @@ func (f *fakePortainer) handler(t *testing.T) http.HandlerFunc {
 		if f.failStep != "" && strings.HasPrefix(key, f.failStep) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte("injected failure"))
+			return
+		}
+		if f.stackReader != "" && r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/stacks/") &&
+			r.Header.Get("X-API-Key") != f.stackReader {
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		writeJSON := func(v any) { _ = json.NewEncoder(w).Encode(v) }

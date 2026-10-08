@@ -114,11 +114,21 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 
 	// Grandfather the stack's existing bind mounts so it keeps deploying
 	// under the compose policy (only on the first refresh).
-	if pc.ComposePolicy == nil {
-		pc.ComposePolicy = grandfatherComposePolicy(cfg, api, pc)
+	// towline.json is agent-writable. When the project lives in the projects
+	// directory, its stack name must match the directory (as destroy
+	// requires) before its IDs are used against Portainer.
+	anchorErr := checkProjectDirAnchor(cfg, dir, pc)
+	if anchorErr != nil {
+		fmt.Printf("  warning: %v; skipped compose policy grandfathering and team role update\n", anchorErr)
 	}
 
-	if !keepRole {
+	// Grandfathering reads the stack with the project's own token, so it
+	// only ever sees a stack Portainer already lets this project read.
+	if pc.ComposePolicy == nil && anchorErr == nil {
+		pc.ComposePolicy = grandfatherComposePolicy(cfg, newProjectAPI(cfg, pc.MCPArgs.Token), pc)
+	}
+
+	if !keepRole && anchorErr == nil {
 		migrateTeamRole(cfg, api, pc)
 	}
 
@@ -169,8 +179,9 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 // uses, except ones that would hand over the host, and reports anything
 // else the compose policy would reject on the next update.
 //
-// towline.json is agent-writable, so its stack ID is only used with the
-// admin key after Portainer confirms it is this project's stack.
+// towline.json is agent-writable, so api should carry the project's own
+// token, and the stack must carry the project's stack name on the
+// configured environment.
 func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) *config.ComposePolicyConfig {
 	policy := &config.ComposePolicyConfig{Mode: "enforce"}
 	if pc.StackID == 0 {
@@ -204,7 +215,10 @@ func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI
 		}
 	}
 	if len(policy.AllowBindMounts) > 0 {
-		fmt.Printf("  Compose policy: allowed existing bind mounts %s\n", strings.Join(policy.AllowBindMounts, ", "))
+		fmt.Printf("  Compose policy: allowing the bind mounts stack %q already uses:\n", stack.Name)
+		for _, m := range policy.AllowBindMounts {
+			fmt.Println("    - " + m)
+		}
 	}
 
 	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts}.Validate(compose)
@@ -221,6 +235,32 @@ func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI
 		fmt.Println("  or \"mode\": \"off\") and run 'towline refresh' again.")
 	}
 	return policy
+}
+
+// checkProjectDirAnchor requires, for a project directory directly inside
+// the projects directory, that towline.json's stack name is
+// <directory name>-dev or -prod. Projects elsewhere (existing codebases)
+// have no such anchor and are not checked here.
+func checkProjectDirAnchor(cfg *config.GlobalConfig, dir string, pc *config.ProjectConfig) error {
+	if cfg.ProjectsDir == "" || filepath.Dir(resolvePath(dir)) != resolvePath(cfg.ProjectsDir) {
+		return nil
+	}
+	name := filepath.Base(resolvePath(dir))
+	if pc.StackName != name+"-dev" && pc.StackName != name+"-prod" {
+		return fmt.Errorf("towline.json stack_name %q does not belong to project %q", pc.StackName, name)
+	}
+	return nil
+}
+
+// resolvePath returns an absolute, symlink-free form of p where possible.
+func resolvePath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	return filepath.Clean(p)
 }
 
 func isDangerousBind(src string) bool {

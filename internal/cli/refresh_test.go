@@ -232,11 +232,33 @@ func TestRefresh_VerifiesTowlineJSONIDs(t *testing.T) {
 	tests := []struct {
 		name            string
 		stack           config.StackInfo
-		envID           int // towline.json environment_id
+		envID           int    // towline.json environment_id
+		stackName       string // towline.json stack_name, if changed
+		reader          string // API key allowed to read stacks (default: the project's)
+		fromCwd         bool   // project outside the projects dir, refreshed from cwd
 		wantStackFile   bool
 		wantPolicy      bool
 		wantEndpointPut bool
 	}{
+		{
+			name:  "stack not readable with the project's token",
+			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}, envID: 1, reader: "ptr_other",
+			wantEndpointPut: true,
+		},
+		{
+			name:  "stack_name and stack_id retargeted at another project",
+			stack: config.StackInfo{ID: 11, Name: "victim-prod", EndpointID: 1}, envID: 1, stackName: "victim-prod",
+		},
+		{
+			name:  "existing codebase outside the projects dir",
+			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}, envID: 1, fromCwd: true,
+			wantStackFile: true, wantPolicy: true, wantEndpointPut: true,
+		},
+		{
+			name:  "existing codebase retargeted at a stack its token can't read",
+			stack: config.StackInfo{ID: 11, Name: "victim-prod", EndpointID: 1}, envID: 1, stackName: "victim-prod",
+			reader: "ptr_victim", fromCwd: true,
+		},
 		{
 			name:  "matching stack and environment",
 			stack: config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}, envID: 1,
@@ -264,6 +286,10 @@ func TestRefresh_VerifiesTowlineJSONIDs(t *testing.T) {
 			f.teams[7] = "team-shop-prod"
 			f.stacks[11] = tt.stack
 			f.stackFiles = map[int]string{11: "services:\n  web:\n    image: nginx\n"}
+			f.stackReader = "ptr_legacy"
+			if tt.reader != "" {
+				f.stackReader = tt.reader
+			}
 			srv := httptest.NewServer(f.handler(t))
 			defer srv.Close()
 
@@ -271,9 +297,20 @@ func TestRefresh_VerifiesTowlineJSONIDs(t *testing.T) {
 			pc, err := config.LoadProjectConfig(dir)
 			require.NoError(t, err)
 			pc.EnvID = tt.envID
+			if tt.stackName != "" {
+				pc.StackName = tt.stackName
+			}
 			require.NoError(t, config.SaveProjectConfig(dir, pc))
 
-			require.NoError(t, runRefresh([]string{"shop"}))
+			if tt.fromCwd {
+				moved := filepath.Join(t.TempDir(), "codebase")
+				require.NoError(t, os.Rename(dir, moved))
+				dir = moved
+				t.Chdir(dir)
+				require.NoError(t, runRefresh(nil))
+			} else {
+				require.NoError(t, runRefresh([]string{"shop"}))
+			}
 			assert.Equal(t, tt.wantStackFile, contains(f.requests, "GET /api/stacks/11/file"))
 			assert.NotContains(t, f.requests, "GET /api/endpoints/2", "must never use towline.json's environment")
 			assert.Equal(t, tt.wantEndpointPut, len(f.endpointPuts) == 1)
