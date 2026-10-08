@@ -76,6 +76,7 @@ func runDestroy(args []string) error {
 
 	// Initialize Portainer API
 	api := newAdminAPI(globalCfg)
+	failed := 0
 
 	// Delete stack
 	if projectCfg.StackID > 0 {
@@ -84,11 +85,14 @@ func runDestroy(args []string) error {
 		switch {
 		case err != nil:
 			fmt.Printf("warning: %v\n", err)
+			failed++
 		case stack.Name != projectCfg.StackName:
 			fmt.Printf("skipped: stack %d is named %q, not %q\n", projectCfg.StackID, stack.Name, projectCfg.StackName)
+			failed++
 		default:
 			if err := api.DeleteStack(stack.ID, stack.EndpointID); err != nil {
 				fmt.Printf("warning: %v\n", err)
+				failed++
 			} else {
 				fmt.Println("OK")
 			}
@@ -103,11 +107,14 @@ func runDestroy(args []string) error {
 		switch {
 		case err != nil:
 			fmt.Printf("warning: %v\n", err)
+			failed++
 		case name != want:
 			fmt.Printf("skipped: user %d is %q, not %q\n", projectCfg.UserID, name, want)
+			failed++
 		default:
 			if err := api.DeleteUser(projectCfg.UserID); err != nil {
 				fmt.Printf("warning: %v\n", err)
+				failed++
 			} else {
 				fmt.Println("OK")
 			}
@@ -122,11 +129,14 @@ func runDestroy(args []string) error {
 		switch {
 		case err != nil:
 			fmt.Printf("warning: %v\n", err)
+			failed++
 		case name != want:
 			fmt.Printf("skipped: team %d is %q, not %q\n", projectCfg.TeamID, name, want)
+			failed++
 		default:
 			if err := api.DeleteTeam(projectCfg.TeamID); err != nil {
 				fmt.Printf("warning: %v\n", err)
+				failed++
 			} else {
 				fmt.Println("OK")
 			}
@@ -134,6 +144,9 @@ func runDestroy(args []string) error {
 	}
 
 	fmt.Println()
+	if failed > 0 {
+		return fmt.Errorf("%d Portainer resource(s) for '%s' were not deleted (see above); check them in Portainer", failed, projectName)
+	}
 	fmt.Printf("Portainer resources for '%s' have been destroyed.\n", projectName)
 	fmt.Printf("Local files remain at: %s\n", projectDir)
 	fmt.Println("Remove them manually if no longer needed: rm -rf " + projectDir)

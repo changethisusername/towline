@@ -349,8 +349,49 @@ func TestDestroy_RefusesTamperedIDs(t *testing.T) {
 	defer srv.Close()
 
 	setupDestroy(t, srv.URL, &config.ProjectConfig{StackName: "app-dev", StackID: 21, TeamID: 22, UserID: 23, EnvID: 1})
-	require.NoError(t, runDestroy([]string{"--confirm", "app"}))
+	err := runDestroy([]string{"--confirm", "app"})
+	assert.ErrorContains(t, err, "3 Portainer resource(s)")
 	assert.Empty(t, f.deleted)
+}
+
+func TestDestroy_ReportsFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		failStep string
+		dropTeam bool
+		wantErr  string
+		wantGone []string
+	}{
+		{name: "all deleted", wantGone: []string{"/api/stacks/11", "/api/users/9", "/api/teams/7"}},
+		{name: "stack delete fails", failStep: "DELETE /api/stacks/", wantErr: "1 Portainer resource(s)",
+			wantGone: []string{"/api/users/9", "/api/teams/7"}},
+		{name: "team lookup fails", failStep: "GET /api/teams/", wantErr: "1 Portainer resource(s)",
+			wantGone: []string{"/api/stacks/11", "/api/users/9"}},
+		{name: "team name mismatch", dropTeam: true, wantErr: "1 Portainer resource(s)",
+			wantGone: []string{"/api/stacks/11", "/api/users/9"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePortainer()
+			f.failStep = tt.failStep
+			f.stacks[11] = config.StackInfo{ID: 11, Name: "app-dev", EndpointID: 1}
+			f.users[9] = "towline-app-dev"
+			if !tt.dropTeam {
+				f.teams[7] = "team-app-dev"
+			}
+			srv := httptest.NewServer(f.handler(t))
+			defer srv.Close()
+
+			setupDestroy(t, srv.URL, &config.ProjectConfig{StackName: "app-dev", StackID: 11, TeamID: 7, UserID: 9, EnvID: 1})
+			err := runDestroy([]string{"--confirm", "app"})
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+			assert.Equal(t, tt.wantGone, f.deleted)
+		})
+	}
 }
 
 func TestDestroy_RefusesForeignStackName(t *testing.T) {
