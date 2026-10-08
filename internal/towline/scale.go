@@ -3,6 +3,7 @@ package towline
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -10,6 +11,26 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"gopkg.in/yaml.v3"
 )
+
+// maxReplicas caps towline_scale so a single call cannot start an
+// unbounded number of containers on the shared host.
+const maxReplicas = 20
+
+// validateReplicas checks that n is a whole number in [0, maxReplicas].
+// Fractions are rejected rather than truncated: 0.5 must not become 0
+// and stop the service.
+func validateReplicas(n float64) (int, error) {
+	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
+		return 0, fmt.Errorf("replicas must be a whole number, got %v", n)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("replicas must be >= 0, got %v", n)
+	}
+	if n > maxReplicas {
+		return 0, fmt.Errorf("replicas must be <= %d, got %v", maxReplicas, n)
+	}
+	return int(n), nil
+}
 
 // HandleScale returns a handler for the towline_scale tool.
 // It parses compose YAML, sets deploy.replicas on the target service, and redeploys.
@@ -22,13 +43,14 @@ func (h *Handlers) HandleScale() server.ToolHandlerFunc {
 			return mcp.NewToolResultErrorFromErr("invalid service parameter", err), nil
 		}
 
-		replicas, err := parser.GetInt("replicas", true)
+		replicasNum, err := parser.GetNumber("replicas", true)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("invalid replicas parameter", err), nil
 		}
 
-		if replicas < 0 {
-			return mcp.NewToolResultError("replicas must be >= 0"), nil
+		replicas, err := validateReplicas(replicasNum)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		h.stackMu.Lock()

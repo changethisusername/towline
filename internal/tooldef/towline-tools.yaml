@@ -1,5 +1,5 @@
 ---
-version: v1.1.0
+version: v1.2.0
 tools:
   - name: towline_service_health
     description: >
@@ -159,7 +159,7 @@ tools:
         type: string
         required: true
       - name: replicas
-        description: Number of replicas
+        description: Number of replicas (whole number from 0 to 20)
         type: number
         required: true
     annotations:
