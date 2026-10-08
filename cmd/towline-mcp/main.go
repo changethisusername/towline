@@ -6,14 +6,9 @@ import (
 	"strings"
 
 	"github.com/changethisusername/towline/internal/approval"
-	"github.com/changethisusername/towline/internal/mcp"
+	"github.com/changethisusername/towline/internal/gateway"
 	"github.com/changethisusername/towline/internal/middleware"
-	"github.com/changethisusername/towline/internal/proxy"
-	"github.com/changethisusername/towline/internal/tooldef"
-	"github.com/changethisusername/towline/internal/towline"
-	"github.com/changethisusername/towline/pkg/portainer/models"
-	"github.com/changethisusername/towline/pkg/toolgen"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/changethisusername/towline/internal/towlinemcp"
 	"github.com/rs/zerolog/log"
 )
 
@@ -35,6 +30,16 @@ var (
 )
 
 func main() {
+	// "towline-mcp gateway" runs the remote MCP gateway; anything else is
+	// the stdio server an agent spawns.
+	if len(os.Args) > 1 && os.Args[1] == "gateway" {
+		gateway.Version = Version
+		if err := gateway.Main(os.Args[2:]); err != nil {
+			log.Fatal().Err(err).Msg("gateway failed")
+		}
+		return
+	}
+
 	log.Info().
 		Str("version", Version).
 		Str("build-date", BuildDate).
@@ -93,41 +98,29 @@ func main() {
 	default:
 		log.Fatal().Msg("-compose-policy must be 'enforce' or 'off'")
 	}
-	for _, p := range strings.Split(*allowBindMountsFlag, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			composePolicy.AllowBindMounts = append(composePolicy.AllowBindMounts, p)
-		}
-	}
-	for _, n := range strings.Split(*allowNetworksFlag, ",") {
-		if n = strings.TrimSpace(n); n != "" {
-			composePolicy.AllowNetworks = append(composePolicy.AllowNetworks, n)
-		}
-	}
-	for _, v := range strings.Split(*allowVolumesFlag, ",") {
-		if v = strings.TrimSpace(v); v != "" {
-			composePolicy.AllowVolumes = append(composePolicy.AllowVolumes, v)
-		}
-	}
+	composePolicy.AllowBindMounts = splitList(*allowBindMountsFlag)
+	composePolicy.AllowNetworks = splitList(*allowNetworksFlag)
+	composePolicy.AllowVolumes = splitList(*allowVolumesFlag)
 
-	// Handle tools.yaml files. Files written by an older version are
-	// upgraded in place (with a .bak copy) so projects pick up new tool
-	// definitions without manual steps.
 	toolsPath := *toolsFlag
 	if toolsPath == "" {
 		toolsPath = defaultToolsPath
 	}
-	status, err := tooldef.EnsureToolsFile(toolsPath, tooldef.ToolsFile)
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to prepare tools.yaml file")
-	}
-	log.Info().Str("path", toolsPath).Msg("tools file " + status)
 
-	towlineToolsPath := defaultTowlineToolsPath
-	status, err = tooldef.EnsureToolsFile(towlineToolsPath, tooldef.TowlineToolsFile)
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to prepare towline-tools.yaml file")
+	var approver approval.Approver
+	if approvalMode == middleware.ApprovalHuman {
+		if *approvalWebhookFlag != "" {
+			webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
+			if err != nil {
+				log.Fatal().Err(err).Msg("invalid -approval-webhook")
+			}
+			approver = webhook
+		} else if tier == middleware.TierProd {
+			log.Warn().Msg("human approval mode without -approval-webhook: prod operations that need approval will be refused")
+		}
+	} else if tier == middleware.TierProd {
+		log.Warn().Msg("agent approval mode: the agent confirms its own prod operations (run 'towline approvals setup' for human approval)")
 	}
-	log.Info().Str("path", towlineToolsPath).Msg("tools file " + status)
 
 	log.Info().
 		Str("portainer-host", *serverFlag).
@@ -135,238 +128,41 @@ func main() {
 		Str("tier", *tierFlag).
 		Msg("starting Towline MCP server")
 
-	// Create the upstream server
-	srv, err := mcp.NewPortainerMCPServer(
-		*serverFlag, token, toolsPath,
-		mcp.WithReadOnly(*readOnlyFlag),
-		mcp.WithDisableVersionCheck(*disableVersionCheckFlag),
-		mcp.WithSkipTLSVerify(*skipTLSVerifyFlag),
-	)
+	inst, err := towlinemcp.Build(towlinemcp.Options{
+		ServerURL:           *serverFlag,
+		Token:               token,
+		ToolsPath:           toolsPath,
+		TowlineToolsPath:    defaultTowlineToolsPath,
+		ReadOnly:            *readOnlyFlag,
+		DisableVersionCheck: *disableVersionCheckFlag,
+		SkipTLSVerify:       *skipTLSVerifyFlag,
+		Stack:               *stackFlag,
+		Tier:                tier,
+		Proxy:               *proxyFlag,
+		CaddyAPI:            *caddyAPIFlag,
+		ApprovalMode:        approvalMode,
+		Approver:            approver,
+		ComposePolicy:       composePolicy,
+	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create server")
 	}
 
-	// Load and merge towline tools
-	towlineTools, err := toolgen.LoadToolsFromYAML(towlineToolsPath, "v1.0.0")
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to load towline tools")
-	}
-	srv.MergeTools(towlineTools)
-
-	// Create middleware instances
-	approvalStore := approval.NewStore()
-	gate := &middleware.ApprovalGate{Mode: approvalMode, Store: approvalStore, Project: *stackFlag}
-	if approvalMode == middleware.ApprovalHuman {
-		if *approvalWebhookFlag != "" {
-			webhook, err := approval.NewWebhook(*approvalWebhookFlag, os.Getenv(approvalAuthEnvVar))
-			if err != nil {
-				log.Fatal().Err(err).Msg("invalid -approval-webhook")
-			}
-			gate.Approver = webhook
-		} else if tier == middleware.TierProd {
-			log.Warn().Msg("human approval mode without -approval-webhook: prod operations that need approval will be refused")
-		}
-	} else if tier == middleware.TierProd {
-		log.Warn().Msg("agent approval mode: the agent confirms its own prod operations (run 'towline approvals setup' for human approval)")
-	}
-	// The stack ID and environment ID are resolved at startup; while either
-	// is unknown (the stack is not created yet, or Portainer was
-	// unreachable) they are looked up again on use.
-	stackScoping := middleware.NewStackScoping(*stackFlag, middleware.WithStackLookup(func() (int, bool) {
-		s, ok := findLocalStack(srv, *stackFlag)
-		return s.ID, ok
-	}))
-
-	// Resolve stack ID at startup
-	resolveStackID(srv, stackScoping, *stackFlag)
-
-	// Helper to create proxy function for ownership checks. HTTP error
-	// statuses come back as errors, never as data.
-	proxyFn := towline.NewProxyFunc(srv.Client().ProxyDockerRequest)
-
-	// Get environment ID from the stack, or 0 until the stack exists
-	envID := getEnvironmentID(srv, *stackFlag)
-	envResolver := middleware.NewEnvResolver(envID, func() int { return getEnvironmentID(srv, *stackFlag) })
-	ownership := middleware.NewContainerOwnership(*stackFlag, envID, proxyFn, middleware.WithEnvResolver(envResolver))
-
-	// Create towline handlers
-	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
-
-	// Build middleware chain for a given tool
-	wrappers := func(toolName string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
-		var mws []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc
-
-		// Outermost: compose security policy, so a stack that would be
-		// rejected anyway never reaches the approval flow
-		mws = append(mws, middleware.NewComposePolicy(toolName, composePolicy))
-
-		// Tier gating
-		mws = append(mws, middleware.NewTierGating(tier, gate, toolName))
-
-		// Stack scoping
-		mws = append(mws, stackScoping.ForTool(toolName))
-
-		// Env filter: strip agent-supplied _TOWLINE_ env vars from create/update
-		// requests, and carry the stack's own internal vars over on update
-		mws = append(mws, middleware.NewEnvFilter(toolName, handlers.PrepareStackUpdate))
-
-		// Container ownership (only for dockerProxy)
-		if toolName == "dockerProxy" {
-			mws = append(mws, ownership.ForDockerProxy())
-		}
-
-		// Innermost for towline tools: keep handlers.EnvID current
-		if strings.HasPrefix(toolName, "towline_") {
-			mws = append(mws, envResolver.Bind(&handlers.EnvID))
-		}
-
-		return mws
-	}
-
-	// Register upstream features with middleware wrapping
-	// We use AddToolWrapped instead of the upstream Add*Features methods
-	registerWrappedUpstreamTools(srv, wrappers)
-
-	// Setup proxy manager (auto-detect or use flag)
-	setupProxyManager(handlers, srv, *stackFlag, *proxyFlag, *caddyAPIFlag)
-
-	// Register towline-specific tools
-	registerTowlineTools(srv, handlers, wrappers)
-
-	err = srv.Start()
+	err = inst.Server.Start()
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to start server")
 	}
 
-	approvalStore.Stop()
+	inst.Close()
 }
 
-// resolveStackID attempts to resolve the stack name to an ID at startup.
-func resolveStackID(srv *mcp.PortainerMCPServer, scoping *middleware.StackScoping, stackName string) {
-	stacks, err := srv.Client().GetLocalStacks()
-	if err != nil {
-		log.Warn().Err(err).Msg("failed to resolve stack ID at startup, entering pending mode")
-		return
-	}
-
-	for _, s := range stacks {
-		if s.Name == stackName {
-			scoping.SetStackID(s.ID)
-			log.Info().Int("stack-id", s.ID).Str("stack-name", stackName).Msg("resolved stack ID")
-			return
+// splitList splits a comma-separated flag value, dropping empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
-
-	log.Warn().Str("stack-name", stackName).Msg("stack not found, entering pending mode")
-}
-
-// getEnvironmentID extracts the environment ID from a local stack, or
-// returns 0 if the stack is not found.
-func getEnvironmentID(srv *mcp.PortainerMCPServer, stackName string) int {
-	s, _ := findLocalStack(srv, stackName)
-	return s.EndpointID
-}
-
-// findLocalStack looks up the named local stack.
-func findLocalStack(srv *mcp.PortainerMCPServer, stackName string) (models.LocalStack, bool) {
-	stacks, err := srv.Client().GetLocalStacks()
-	if err != nil {
-		return models.LocalStack{}, false
-	}
-	for _, s := range stacks {
-		if s.Name == stackName {
-			return s, true
-		}
-	}
-	return models.LocalStack{}, false
-}
-
-// registerWrappedUpstreamTools registers all upstream tools with middleware wrappers.
-func registerWrappedUpstreamTools(srv *mcp.PortainerMCPServer, wrappers func(string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc) {
-	// Local stack tools
-	srv.AddToolWrapped("listLocalStacks", srv.HandleGetLocalStacks(), wrappers("listLocalStacks")...)
-	srv.AddToolWrapped("getLocalStackFile", srv.HandleGetLocalStackFile(), wrappers("getLocalStackFile")...)
-
-	if !srv.IsReadOnly() {
-		srv.AddToolWrapped("createLocalStack", srv.HandleCreateLocalStack(), wrappers("createLocalStack")...)
-		srv.AddToolWrapped("updateLocalStack", srv.HandleUpdateLocalStack(), wrappers("updateLocalStack")...)
-		srv.AddToolWrapped("startLocalStack", srv.HandleStartLocalStack(), wrappers("startLocalStack")...)
-		srv.AddToolWrapped("stopLocalStack", srv.HandleStopLocalStack(), wrappers("stopLocalStack")...)
-		srv.AddToolWrapped("deleteLocalStack", srv.HandleDeleteLocalStack(), wrappers("deleteLocalStack")...)
-	}
-
-	// Docker proxy
-	srv.AddToolWrapped("dockerProxy", srv.HandleDockerProxy(), wrappers("dockerProxy")...)
-
-	// We intentionally do NOT register environment, team, user, access group,
-	// edge stack, kubernetes, tag, or settings tools — they are admin-level
-	// operations that should not be available to project-scoped agents.
-	// The agent only needs local stack management and Docker proxy.
-}
-
-// setupProxyManager configures the proxy backend on the handlers.
-// If an explicit flag is provided, that backend is used.
-// Otherwise it auto-detects from the compose file (checks for traefik labels).
-func setupProxyManager(h *towline.Handlers, srv *mcp.PortainerMCPServer, stackName, proxyFlag, caddyAPI string) {
-	if proxyFlag != "" {
-		switch proxy.Backend(proxyFlag) {
-		case proxy.BackendTraefik:
-			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
-			log.Info().Str("proxy", "traefik").Msg("proxy backend configured via flag")
-		case proxy.BackendCaddy:
-			cm := proxy.NewCaddyManager(caddyAPI, stackName)
-			h.ProxyManager = cm
-			h.CaddyManager = cm
-			log.Info().Str("proxy", "caddy").Str("api", caddyAPI).Msg("proxy backend configured via flag")
-		case proxy.BackendCloudflare:
-			h.ProxyManager = &proxy.CloudflareManager{StackName: stackName}
-			log.Info().Str("proxy", "cloudflare").Msg("proxy backend configured via flag")
-		default:
-			log.Warn().Str("proxy", proxyFlag).Msg("unknown proxy backend, will require explicit method parameter")
-		}
-		return
-	}
-
-	// Auto-detect from compose file
-	stacks, err := srv.Client().GetLocalStacks()
-	if err != nil {
-		log.Warn().Err(err).Msg("cannot auto-detect proxy backend: failed to get stacks")
-		return
-	}
-
-	for _, s := range stacks {
-		if s.Name != stackName {
-			continue
-		}
-
-		compose, err := srv.Client().GetLocalStackFile(s.ID)
-		if err != nil {
-			log.Warn().Err(err).Msg("cannot auto-detect proxy backend: failed to get compose file")
-			return
-		}
-
-		if strings.Contains(compose, "traefik.http.routers") || strings.Contains(compose, "traefik.enable") {
-			h.ProxyManager = &proxy.TraefikManager{StackName: stackName}
-			log.Info().Str("proxy", "traefik").Msg("proxy backend auto-detected from compose labels")
-			return
-		}
-
-		break
-	}
-
-	log.Info().Msg("no proxy backend detected; domain tools will require explicit method parameter")
-}
-
-// registerTowlineTools registers all towline-specific tools with the MCP server.
-func registerTowlineTools(srv *mcp.PortainerMCPServer, h *towline.Handlers, wrappers func(string) []func(mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc) {
-	srv.AddToolWrapped("towline_service_health", h.HandleServiceHealth(), wrappers("towline_service_health")...)
-	srv.AddToolWrapped("towline_service_logs", h.HandleServiceLogs(), wrappers("towline_service_logs")...)
-	srv.AddToolWrapped("towline_env_get", h.HandleEnvGet(), wrappers("towline_env_get")...)
-	srv.AddToolWrapped("towline_env_set", h.HandleEnvSet(), wrappers("towline_env_set")...)
-	srv.AddToolWrapped("towline_domains_list", h.HandleDomainsList(), wrappers("towline_domains_list")...)
-	srv.AddToolWrapped("towline_domains_add", h.HandleDomainsAdd(), wrappers("towline_domains_add")...)
-	srv.AddToolWrapped("towline_domains_remove", h.HandleDomainsRemove(), wrappers("towline_domains_remove")...)
-	srv.AddToolWrapped("towline_scale", h.HandleScale(), wrappers("towline_scale")...)
-	srv.AddToolWrapped("towline_deployments", h.HandleDeployments(), wrappers("towline_deployments")...)
-	srv.AddToolWrapped("towline_exec", h.HandleExec(), wrappers("towline_exec")...)
+	return out
 }

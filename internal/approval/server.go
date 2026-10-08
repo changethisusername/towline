@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -210,25 +211,13 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	s.pruneLocked()
-	if _, exists := s.records[req.ID]; exists {
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, "request id already exists")
+	if err := s.submit(req); err != nil {
+		code := http.StatusConflict
+		if errors.Is(err, errTooManyPending) {
+			code = http.StatusTooManyRequests
+		}
+		writeError(w, code, err.Error())
 		return
-	}
-	if s.pendingCountLocked() >= maxPendingRecords {
-		s.mu.Unlock()
-		writeError(w, http.StatusTooManyRequests, "too many pending approval requests")
-		return
-	}
-	rec := &Record{Request: req, Status: StatusPending, CreatedAt: s.now()}
-	s.records[req.ID] = rec
-	s.mu.Unlock()
-
-	log.Printf("approval requested: %s on %s (id %s)", req.Action, req.Project, shortID(req.ID))
-	if s.cfg.NtfyURL != "" {
-		go s.notify(req)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"status": string(StatusPending)})
 }
@@ -254,6 +243,73 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status = StatusRejected
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": string(status)})
+}
+
+var errTooManyPending = errors.New("too many pending approval requests")
+
+// submit records a new pending request and notifies the approver.
+func (s *Server) submit(req Request) error {
+	s.mu.Lock()
+	s.pruneLocked()
+	if _, exists := s.records[req.ID]; exists {
+		s.mu.Unlock()
+		return errors.New("request id already exists")
+	}
+	if s.pendingCountLocked() >= maxPendingRecords {
+		s.mu.Unlock()
+		return errTooManyPending
+	}
+	rec := &Record{Request: req, Status: StatusPending, CreatedAt: s.now()}
+	s.records[req.ID] = rec
+	s.mu.Unlock()
+
+	log.Printf("approval requested: %s on %s (id %s)", req.Action, req.Project, shortID(req.ID))
+	if s.cfg.NtfyURL != "" {
+		go s.notify(req)
+	}
+	return nil
+}
+
+// --- In-process API (remote gateway) ---
+
+// Submit records a request without going through HTTP, so a Server can be
+// used directly as the Approver of towline-mcp instances in the same
+// process.
+func (s *Server) Submit(_ context.Context, req Request) error {
+	if req.ID == "" || req.Action == "" || len(req.ID) > 128 {
+		return errors.New("id and action are required")
+	}
+	return s.submit(req)
+}
+
+// Status reports a request's decision; expired requests read as rejected.
+func (s *Server) Status(_ context.Context, id string) (Status, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	rec, ok := s.records[id]
+	if !ok {
+		return "", errors.New("unknown approval request")
+	}
+	status := s.effectiveStatusLocked(rec)
+	if status == StatusExpired {
+		status = StatusRejected
+	}
+	return status, nil
+}
+
+// Records returns every known request, newest first.
+func (s *Server) Records() []Record {
+	return s.snapshot()
+}
+
+// Decide records a human decision (approved or rejected) on a pending
+// request. Callers must have authenticated the human.
+func (s *Server) Decide(id string, status Status) error {
+	if status != StatusApproved && status != StatusRejected {
+		return errors.New("invalid decision")
+	}
+	return s.setDecision(id, status)
 }
 
 // --- Approver API ---

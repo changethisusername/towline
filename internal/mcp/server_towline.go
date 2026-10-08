@@ -48,3 +48,9 @@ func (s *PortainerMCPServer) MergeTools(additional map[string]mcp.Tool) {
 		s.tools[name] = tool
 	}
 }
+
+// MCPServer returns the underlying MCP server, for transports other than
+// stdio (the remote gateway).
+func (s *PortainerMCPServer) MCPServer() *server.MCPServer {
+	return s.srv
+}

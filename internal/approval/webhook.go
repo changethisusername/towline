@@ -28,6 +28,8 @@ type Request struct {
 	Action       string `json:"action"`
 	Description  string `json:"description"`
 	StackContent string `json:"stackContent,omitempty"`
+	// Client names the remote client that asked (remote gateway only).
+	Client string `json:"client,omitempty"`
 }
 
 // Approver submits approval requests to a human and reports their decision.
