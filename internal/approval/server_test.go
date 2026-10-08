@@ -180,9 +180,15 @@ func TestServer_UIFlow(t *testing.T) {
 }
 
 func TestServer_Ntfy(t *testing.T) {
-	got := make(chan *http.Request, 1)
+	type notification struct {
+		header http.Header
+		body   string
+	}
+	got := make(chan notification, 1)
 	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got <- r
+		// Read the body here: it is closed once the handler returns.
+		body, _ := io.ReadAll(r.Body)
+		got <- notification{r.Header, string(body)}
 	}))
 	defer ntfy.Close()
 
@@ -196,11 +202,10 @@ func TestServer_Ntfy(t *testing.T) {
 
 	select {
 	case r := <-got:
-		assert.Contains(t, r.Header.Get("Title"), "app-prod")
-		assert.Equal(t, "https://approve.example/ui", r.Header.Get("Click"))
-		body, _ := io.ReadAll(r.Body)
-		assert.Contains(t, string(body), "towline_env_set")
-		assert.NotContains(t, string(body), "hunter2", "tool arguments must not leave the server")
+		assert.Contains(t, r.header.Get("Title"), "app-prod")
+		assert.Equal(t, "https://approve.example/ui", r.header.Get("Click"))
+		assert.Contains(t, r.body, "towline_env_set")
+		assert.NotContains(t, r.body, "hunter2", "tool arguments must not leave the server")
 	case <-time.After(5 * time.Second):
 		t.Fatal("no ntfy notification")
 	}
