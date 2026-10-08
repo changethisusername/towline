@@ -60,6 +60,26 @@ type ComposePolicy struct {
 	// use its own "<service>.<stack>.towline", so one project cannot answer
 	// for another project's routed service on a shared proxy network.
 	StackName string
+	// AllowVolumes lists external or explicitly named volumes (by effective
+	// name: "name" if set, else the key) that stacks may mount. A volume
+	// named "<stack>_<key>", compose's own default, is always allowed.
+	AllowVolumes []string
+}
+
+// allowsVolume reports whether an external or named volume may be used.
+func (p ComposePolicy) allowsVolume(key, name string) bool {
+	if name == "" || strings.Contains(name, "$") {
+		return false
+	}
+	if p.StackName != "" && name == p.StackName+"_"+key {
+		return true
+	}
+	for _, allowed := range p.AllowVolumes {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedNetworkNames are Docker's built-in networks; joining them as an
@@ -168,10 +188,8 @@ func (p ComposePolicy) Validate(content string) []string {
 			if d, ok := vol["driver"].(string); ok && d != "local" {
 				add("volume %q: only the local volume driver is allowed", name)
 			}
-			for _, key := range []string{"external", "name"} {
-				if _, ok := vol[key]; ok {
-					add("volume %q: %q is not allowed (it can mount another project's volume)", name, key)
-				}
+			if ext, ok := externalNetworkName(name, vol); ok && !p.allowsVolume(name, ext) {
+				add("volume %q: external or named volume %q is not allowed (it can mount another project's volume); a human can allow it in compose_policy.allow_volumes", name, ext)
 			}
 		}
 	}
@@ -520,6 +538,25 @@ func isSafeRelativePath(p string) bool {
 	}
 	clean := path.Clean(p)
 	return clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+// ExternalVolumeNames returns the effective names of top-level volumes that
+// are external or explicitly named.
+func ExternalVolumeNames(content string) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return nil
+	}
+	vols, _ := doc["volumes"].(map[string]any)
+	var names []string
+	for key, raw := range vols {
+		vol, _ := raw.(map[string]any)
+		if name, ok := externalNetworkName(key, vol); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ExternalNetworkNames returns the effective names of top-level networks

@@ -149,7 +149,8 @@ If a project really needs host paths or a shared network, you (the human, not th
 "compose_policy": {
   "mode": "enforce",
   "allow_bind_mounts": ["/srv/app", "."],
-  "allow_networks": ["proxy"]
+  "allow_networks": ["proxy"],
+  "allow_volumes": ["legacy_data"]
 }
 ```
 
@@ -157,9 +158,10 @@ If a project really needs host paths or a shared network, you (the human, not th
 - `"."` allows relative paths inside the stack directory (e.g. `./config`).
 - `..`, `~` and `${VAR}` sources are never allowed.
 - `allow_networks` lists external networks the stack may join (e.g. a shared Traefik `proxy` network), matched on the effective name: `name:` if set, else the network's key. `host`, `bridge` and `none` are never allowed.
+- `allow_volumes` lists external or explicitly named volumes the stack may mount, by the same effective name. A volume named `<stack>_<key>` (compose's default) is always allowed.
 - `"mode": "off"` disables the compose policy for the project entirely.
 
-All other policy rules still apply. After editing, run `towline refresh` in the project (or `towline refresh <name>`) — it renders the policy into the MCP configs as `-allow-bind-mounts /srv/app,.`, `-allow-networks proxy` or `-compose-policy off` — and restart the agent session.
+All other policy rules still apply. After editing, run `towline refresh` in the project (or `towline refresh <name>`) — it renders the policy into the MCP configs as `-allow-bind-mounts /srv/app,.`, `-allow-networks proxy`, `-allow-volumes legacy_data` or `-compose-policy off` — and restart the agent session.
 
 As a server-side backstop, you can also restrict non-admin users in Portainer's environment security settings (e.g. disable bind mounts and privileged mode for regular users) — project users are non-admins, so those settings apply to them.
 
@@ -630,7 +632,7 @@ The generic configuration is in `towline.json` at the project root. It contains 
 Command: towline-mcp
 Args: -server <url> -stack <stack-name> -tier <tier> [-skip-tls-verify]
       [-approval-mode human|agent] [-approval-webhook <url>]
-      [-compose-policy off] [-allow-bind-mounts <path,...>] [-allow-networks <name,...>]
+      [-compose-policy off] [-allow-bind-mounts <path,...>] [-allow-networks <name,...>] [-allow-volumes <name,...>]
 Env:  TOWLINE_PORTAINER_TOKEN=<token>
       [TOWLINE_APPROVAL_WEBHOOK_TOKEN=<webhook token>]
 ```
@@ -656,7 +658,7 @@ For each project:
 - **Claude Code permissions** — makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings.
 - **File hygiene** — sets token-bearing files to `0600` and their directories to `0700`, and adds missing entries to `.gitignore`. If those files are already tracked by git, it warns you: untrack them with `git rm --cached <file>`, and if the repository was ever pushed, revoke the token in Portainer.
 - **Team role** — moves the project team to Portainer's Standard user role, after checking that the team is named `team-<stack>`. Use `--keep-role` to skip this.
-- **Compose policy** — on the first refresh, reads the deployed compose file and allows the bind mounts it already uses in `compose_policy.allow_bind_mounts` (absolute host paths; `"."` for relative ones), so the stack keeps deploying. Host-control paths are never allowed automatically: `/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`. External networks the deployed stack already joins are allowed in `compose_policy.allow_networks` (except `host`, `bridge` and `none`); this also runs once for projects whose `compose_policy` predates `allow_networks`. Any remaining policy violations are printed with how to resolve them (remove them from the stack, or edit `compose_policy` yourself and refresh again).
+- **Compose policy** — on the first refresh, reads the deployed compose file and allows the bind mounts it already uses in `compose_policy.allow_bind_mounts` (absolute host paths; `"."` for relative ones), so the stack keeps deploying. Host-control paths are never allowed automatically: `/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`. External networks the deployed stack already joins are allowed in `compose_policy.allow_networks` (except `host`, `bridge` and `none`), and its external or named volumes in `compose_policy.allow_volumes`; this also runs once for projects whose `compose_policy` predates `allow_networks` or `allow_volumes`. Any remaining policy violations are printed with how to resolve them (remove them from the stack, or edit `compose_policy` yourself and refresh again).
 
 Restart your agent sessions afterwards so they load the new MCP configuration.
 

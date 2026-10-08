@@ -20,14 +20,14 @@ var generatedFlags = map[string]bool{
 	"-server": true, "-token": true, "-stack": true, "-tier": true,
 	"-disable-version-check": true, "-skip-tls-verify": true,
 	"-approval-mode": true, "-approval-webhook": true,
-	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true,
+	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true, "-allow-volumes": true,
 }
 
 // valueFlags are generated flags that take a value argument.
 var valueFlags = map[string]bool{
 	"-server": true, "-token": true, "-stack": true, "-tier": true,
 	"-approval-mode": true, "-approval-webhook": true,
-	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true,
+	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true, "-allow-volumes": true,
 }
 
 // dangerousBindSources are never allowed automatically, even when an
@@ -128,7 +128,7 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 		projectAPI := newProjectAPI(cfg, pc.MCPArgs.Token)
 		if pc.ComposePolicy == nil {
 			pc.ComposePolicy = grandfatherComposePolicy(cfg, projectAPI, pc)
-		} else if pc.ComposePolicy.AllowNetworks == nil {
+		} else if pc.ComposePolicy.AllowNetworks == nil || pc.ComposePolicy.AllowVolumes == nil {
 			grandfatherNetworks(cfg, projectAPI, pc)
 		}
 	}
@@ -188,7 +188,7 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 // token, and the stack must carry the project's stack name on the
 // configured environment.
 func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) *config.ComposePolicyConfig {
-	policy := &config.ComposePolicyConfig{Mode: "enforce", AllowNetworks: []string{}}
+	policy := &config.ComposePolicyConfig{Mode: "enforce", AllowNetworks: []string{}, AllowVolumes: []string{}}
 	if pc.StackID == 0 {
 		return policy
 	}
@@ -215,8 +215,9 @@ func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI
 		}
 	}
 	policy.AllowNetworks = existingNetworks(compose)
+	policy.AllowVolumes = existingVolumes(compose)
 
-	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts, AllowNetworks: policy.AllowNetworks, StackName: pc.StackName}.Validate(compose)
+	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts, AllowNetworks: policy.AllowNetworks, AllowVolumes: policy.AllowVolumes, StackName: pc.StackName}.Validate(compose)
 	if len(remaining) > 0 {
 		fmt.Println("  warning: the deployed compose file uses settings the compose policy rejects, so the")
 		fmt.Println("  agent's next updateLocalStack will fail until they are removed:")
@@ -227,23 +228,50 @@ func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI
 			fmt.Printf("  (%s not allowed automatically: these mounts give control of the host)\n", strings.Join(refused, ", "))
 		}
 		fmt.Println("  If the stack really needs them, set compose_policy in towline.json (allow_bind_mounts,")
-		fmt.Println("  allow_networks, or \"mode\": \"off\") and run 'towline refresh' again.")
+		fmt.Println("  allow_networks, allow_volumes, or \"mode\": \"off\") and run 'towline refresh' again.")
 	}
 	return policy
 }
 
-// grandfatherNetworks allows the external networks the deployed stack
-// already joins, for projects whose compose policy predates allow_networks.
+// grandfatherNetworks allows the external networks and volumes the deployed
+// stack already uses, for projects whose compose policy predates
+// allow_networks or allow_volumes.
 func grandfatherNetworks(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) {
+	cp := pc.ComposePolicy
 	if pc.StackID == 0 {
-		pc.ComposePolicy.AllowNetworks = []string{}
+		if cp.AllowNetworks == nil {
+			cp.AllowNetworks = []string{}
+		}
+		if cp.AllowVolumes == nil {
+			cp.AllowVolumes = []string{}
+		}
 		return
 	}
 	_, compose, ok := readProjectStack(cfg, api, pc)
 	if !ok {
 		return // retry on the next refresh
 	}
-	pc.ComposePolicy.AllowNetworks = existingNetworks(compose)
+	if cp.AllowNetworks == nil {
+		cp.AllowNetworks = existingNetworks(compose)
+	}
+	if cp.AllowVolumes == nil {
+		cp.AllowVolumes = existingVolumes(compose)
+	}
+}
+
+// existingVolumes returns the external or named volumes a compose file
+// mounts, as a non-nil list so towline.json records that grandfathering ran.
+func existingVolumes(compose string) []string {
+	allowed := []string{}
+	for _, name := range middleware.ExternalVolumeNames(compose) {
+		if !strings.Contains(name, "$") {
+			allowed = appendUnique(allowed, name)
+		}
+	}
+	if len(allowed) > 0 {
+		fmt.Printf("  Compose policy: allowed existing external or named volumes %s\n", strings.Join(allowed, ", "))
+	}
+	return allowed
 }
 
 // readProjectStack reads the deployed compose file for grandfathering. The

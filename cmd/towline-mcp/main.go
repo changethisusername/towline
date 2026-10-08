@@ -59,6 +59,7 @@ func main() {
 	composePolicyFlag := flag.String("compose-policy", "enforce", "Compose security policy for stack create/update: enforce or off")
 	allowBindMountsFlag := flag.String("allow-bind-mounts", "", "Comma-separated host paths that stacks may bind mount (\".\" allows paths inside the stack directory)")
 	allowNetworksFlag := flag.String("allow-networks", "", "Comma-separated external network names that stacks may join (host, none and bridge are never allowed)")
+	allowVolumesFlag := flag.String("allow-volumes", "", "Comma-separated external or named volumes that stacks may mount")
 
 	flag.Parse()
 
@@ -100,6 +101,11 @@ func main() {
 	for _, n := range strings.Split(*allowNetworksFlag, ",") {
 		if n = strings.TrimSpace(n); n != "" {
 			composePolicy.AllowNetworks = append(composePolicy.AllowNetworks, n)
+		}
+	}
+	for _, v := range strings.Split(*allowVolumesFlag, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			composePolicy.AllowVolumes = append(composePolicy.AllowVolumes, v)
 		}
 	}
 

@@ -56,6 +56,7 @@ func projectTemplateData(cfg *config.GlobalConfig, projectName string, pc *confi
 		data.ComposePolicyOff = cp.Mode == "off"
 		data.AllowBindMounts = strings.Join(cp.AllowBindMounts, ",")
 		data.AllowNetworks = strings.Join(cp.AllowNetworks, ",")
+		data.AllowVolumes = strings.Join(cp.AllowVolumes, ",")
 	}
 	return data
 }

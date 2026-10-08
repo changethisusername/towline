@@ -74,9 +74,9 @@ volumes:
 		{name: "second document", compose: "services:\n  a:\n    image: x\n---\nservices:\n  a:\n    privileged: true\n", wantErr: "single YAML document"},
 		{name: "trailing empty document", compose: "services:\n  a:\n    image: x\n---\n", wantErr: "single YAML document"},
 		{name: "invalid second document", compose: "services: {}\n---\nservices: [\n", wantErr: "single YAML document"},
-		{name: "external volume", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    external: true\n", wantErr: `volume "v": "external" is not allowed`},
-		{name: "external volume false", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    external: false\n", wantErr: `"external" is not allowed`},
-		{name: "named volume of another project", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    name: otherapp_db_data\n", wantErr: `volume "v": "name" is not allowed`},
+		{name: "external volume", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    external: true\n", wantErr: `volume "v": external or named volume "v" is not allowed`},
+		{name: "external volume false", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    external: false\n", wantErr: `external or named volume "v" is not allowed`},
+		{name: "named volume of another project", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    name: otherapp_db_data\n", wantErr: `volume "v": external or named volume "otherapp_db_data" is not allowed`},
 		{name: "local volume driver allowed", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    driver: local\n  w: {}\n"},
 		{name: "external network", compose: "services:\n  a:\n    image: x\n    networks: [n]\nnetworks:\n  n:\n    external: true\n", wantErr: `network "n": external network "n" is not allowed`},
 		{name: "named network of another project", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    name: otherapp_default\n", wantErr: `external network "otherapp_default" is not allowed`},
@@ -284,6 +284,33 @@ func TestComposePolicy_ReservedTowlineNames(t *testing.T) {
 			if tt.wantErr {
 				require.NotEmpty(t, v)
 				assert.Contains(t, strings.Join(v, "\n"), "reserved")
+			} else {
+				assert.Empty(t, v)
+			}
+		})
+	}
+}
+
+func TestComposePolicy_AllowVolumes(t *testing.T) {
+	const vol = "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n"
+	tests := []struct {
+		name    string
+		policy  ComposePolicy
+		compose string
+		wantErr bool
+	}{
+		{name: "own default name", policy: ComposePolicy{StackName: "shop-dev"}, compose: vol + "    name: shop-dev_v\n"},
+		{name: "own name, other key", policy: ComposePolicy{StackName: "shop-dev"}, compose: vol + "    name: shop-dev_other\n", wantErr: true},
+		{name: "external not listed", policy: ComposePolicy{StackName: "shop-dev"}, compose: vol + "    external: true\n", wantErr: true},
+		{name: "external listed", policy: ComposePolicy{AllowVolumes: []string{"v"}}, compose: vol + "    external: true\n"},
+		{name: "named listed", policy: ComposePolicy{AllowVolumes: []string{"legacy_data"}}, compose: vol + "    name: legacy_data\n"},
+		{name: "interpolated never allowed", policy: ComposePolicy{AllowVolumes: []string{"${X}"}}, compose: vol + "    name: ${X}\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := tt.policy.Validate(tt.compose)
+			if tt.wantErr {
+				assert.NotEmpty(t, v)
 			} else {
 				assert.Empty(t, v)
 			}

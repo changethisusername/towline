@@ -36,6 +36,7 @@ type TemplateData struct {
 	ComposePolicyOff bool
 	AllowBindMounts  string
 	AllowNetworks    string
+	AllowVolumes     string
 }
 
 // Permissions for generated files. Agent configs contain the project's

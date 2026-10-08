@@ -331,10 +331,10 @@ Created by `towline init`. Contains stack metadata and scoped credentials. The g
 `towline.json` can also relax the compose security policy for one project (edited by you, not the agent):
 
 ```json
-"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."], "allow_networks": ["proxy"] }
+"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."], "allow_networks": ["proxy"], "allow_volumes": ["legacy_data"] }
 ```
 
-An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `allow_networks` lists external networks (e.g. a shared Traefik network) by effective name (`name:` if set, else the key); `host`, `bridge` and `none` are never allowed. `"mode": "off"` disables the policy. The other policy rules still apply. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-allow-networks` / `-compose-policy off` into the MCP configs.
+An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `allow_networks` lists external networks (e.g. a shared Traefik network) by effective name (`name:` if set, else the key); `host`, `bridge` and `none` are never allowed. `allow_volumes` lists external or explicitly named volumes the same way (a volume named `<stack>_<key>`, compose's default, is always fine). `"mode": "off"` disables the policy. The other policy rules still apply. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-allow-networks` / `-allow-volumes` / `-compose-policy off` into the MCP configs.
 
 ---
 
@@ -351,7 +351,7 @@ Existing projects keep working without `refresh` (legacy `-token` flag, agent-co
 - makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings
 - fixes permissions (`0600` files, `0700` dirs) and `.gitignore`, and warns if token-bearing files are tracked by git (`git rm --cached`; revoke the token if the repo was pushed)
 - moves the project team to the Standard user role, after checking the team is `team-<stack>` (`--keep-role` skips this)
-- on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`) and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
+- on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`), its external or named volumes in `compose_policy.allow_volumes`, and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
 
 Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).
 
