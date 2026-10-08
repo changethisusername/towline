@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,9 @@ import (
 const (
 	// maxRequestBody bounds approval request payloads (compose files included).
 	maxRequestBody = 1 << 20
+	// maxPendingRecords caps undecided requests, so an agent holding the
+	// webhook token cannot exhaust memory or flood the approver.
+	maxPendingRecords = 100
 	// recordRetention is how long decided or expired requests stay visible.
 	recordRetention = 24 * time.Hour
 	// sessionTTL bounds how long a UI login lasts.
@@ -213,6 +217,11 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "request id already exists")
 		return
 	}
+	if s.pendingCountLocked() >= maxPendingRecords {
+		s.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "too many pending approval requests")
+		return
+	}
 	rec := &Record{Request: req, Status: StatusPending, CreatedAt: s.now()}
 	s.records[req.ID] = rec
 	s.mu.Unlock()
@@ -287,6 +296,16 @@ func (s *Server) effectiveStatusLocked(rec *Record) Status {
 	return rec.Status
 }
 
+func (s *Server) pendingCountLocked() int {
+	n := 0
+	for _, rec := range s.records {
+		if s.effectiveStatusLocked(rec) == StatusPending {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *Server) pruneLocked() {
 	cutoff := s.now().Add(-recordRetention)
 	for id, rec := range s.records {
@@ -314,7 +333,9 @@ func (s *Server) snapshot() []Record {
 // --- Notifications ---
 
 func (s *Server) notify(req Request) {
-	body := fmt.Sprintf("%s on %s\n%s", req.Action, req.Project, req.Description)
+	// Tool arguments can carry secrets (env values, exec commands), and ntfy
+	// topics are readable by anyone who knows them, so details stay in the UI.
+	body := fmt.Sprintf("%s on %s (id %s)", req.Action, req.Project, shortID(req.ID))
 	httpReq, err := http.NewRequest(http.MethodPost, s.cfg.NtfyURL, strings.NewReader(body))
 	if err != nil {
 		log.Printf("ntfy: %v", err)
@@ -339,7 +360,7 @@ func (s *Server) notify(req Request) {
 // --- Web UI ---
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
+	if !s.sameOrigin(r) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
@@ -356,7 +377,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || strings.HasPrefix(s.cfg.PublicURL, "https://"),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
@@ -364,7 +385,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if id, sess, ok := s.sessionFor(r); ok && sameOrigin(r) && r.FormValue("csrf") == sess.csrf {
+	if id, sess, ok := s.sessionFor(r); ok && s.sameOrigin(r) && r.FormValue("csrf") == sess.csrf {
 		s.mu.Lock()
 		delete(s.sessions, id)
 		s.mu.Unlock()
@@ -379,7 +400,7 @@ func (s *Server) handleUIDecide(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui", http.StatusSeeOther)
 		return
 	}
-	if !sameOrigin(r) || subtle.ConstantTimeCompare([]byte(r.FormValue("csrf")), []byte(sess.csrf)) != 1 {
+	if !s.sameOrigin(r) || subtle.ConstantTimeCompare([]byte(r.FormValue("csrf")), []byte(sess.csrf)) != 1 {
 		http.Error(w, "invalid form submission", http.StatusForbidden)
 		return
 	}
@@ -407,13 +428,22 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	s.renderUI(w, sess.csrf, "")
 }
 
-// sameOrigin rejects cross-site form posts when the browser tells us the origin.
-func sameOrigin(r *http.Request) bool {
+// sameOrigin rejects cross-site form posts when the browser tells us the
+// origin. Behind a reverse proxy the Host header may be the upstream address,
+// so the configured public URL's host is also accepted.
+func (s *Server) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" || origin == "null" {
 		return r.Header.Get("Sec-Fetch-Site") != "cross-site"
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://") == r.Host
+	host := strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://")
+	if host == r.Host {
+		return true
+	}
+	if u, err := url.Parse(s.cfg.PublicURL); err == nil && u.Host != "" {
+		return host == u.Host
+	}
+	return false
 }
 
 type uiData struct {

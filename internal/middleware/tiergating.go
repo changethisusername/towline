@@ -12,7 +12,9 @@ import (
 )
 
 // maxDescriptionLen caps the argument summary sent to the approval server.
-const maxDescriptionLen = 4000
+// Longer arguments are refused rather than truncated, so the approver always
+// sees everything the operation will do.
+const maxDescriptionLen = 64 << 10
 
 // ApprovalMode selects who approves prod operations.
 type ApprovalMode string
@@ -105,16 +107,18 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 				return requestApproval(ctx, gate, toolName, args)
 			}
 
-			pending := gate.Store.Peek(token, args)
+			pending := gate.Store.Claim(token, args)
 			if pending == nil {
-				return mcp.NewToolResultError("Invalid, expired, or mismatched approval token. The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
+				return mcp.NewToolResultError("Invalid, expired, or mismatched approval token (or one already in use by another call). The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
 			}
 			if pending.ToolName != toolName {
+				gate.Store.Release(token)
 				return mcp.NewToolResultError(fmt.Sprintf("Approval token was issued for %q, not %q. Request a new token for this tool.", pending.ToolName, toolName)), nil
 			}
 
-			status, err := gate.Approver.Status(ctx, token)
+			status, err := gate.Approver.Status(ctx, pending.RequestID)
 			if err != nil {
+				gate.Store.Release(token)
 				return mcp.NewToolResultErrorFromErr("failed to check approval status", err), nil
 			}
 			switch status {
@@ -125,6 +129,7 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 				gate.Store.Consume(token)
 				return mcp.NewToolResultError(fmt.Sprintf("Production operation %q was rejected by a human approver. Do not retry without discussing it with your partner.", toolName)), nil
 			default:
+				gate.Store.Release(token)
 				return mcp.NewToolResultText(fmt.Sprintf(
 					"Approval for %s is still pending. Wait for your human partner to approve it, then re-call with the same arguments and approvalToken: %q",
 					toolName, token)), nil
@@ -158,12 +163,21 @@ func agentConfirm(ctx context.Context, gate *ApprovalGate, toolName string, requ
 
 func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, args map[string]any) (*mcp.CallToolResult, error) {
 	token := gate.Store.Request(toolName, args)
+	pending := gate.Store.Peek(token, args)
+	if pending == nil {
+		return mcp.NewToolResultError("failed to record approval request"), nil
+	}
 
+	description, err := describeArgs(args)
+	if err != nil {
+		gate.Store.Consume(token)
+		return mcp.NewToolResultErrorFromErr("failed to prepare approval request", err), nil
+	}
 	req := approval.Request{
-		ID:          token,
+		ID:          pending.RequestID,
 		Project:     gate.Project,
 		Action:      toolName,
-		Description: describeArgs(args),
+		Description: description,
 	}
 	if file, ok := args["file"].(string); ok {
 		req.StackContent = file
@@ -175,15 +189,24 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 	}
 
 	msg := fmt.Sprintf(
-		"Production operation requires human approval.\nAction: %s\nAn approval request has been sent (ID %s). Tell your partner what this change does and wait for them to approve it. Then re-call this tool with identical arguments plus approvalToken: %q",
-		toolName, token, token,
+		"Production operation requires human approval.\nAction: %s\nAn approval request has been sent (shown to your partner as %s). Tell your partner what this change does and wait for them to approve it. Then re-call this tool with identical arguments plus approvalToken: %q",
+		toolName, shortRequestID(pending.RequestID), token,
 	)
 	return mcp.NewToolResultText(msg), nil
 }
 
+// shortRequestID is the prefix of a request ID the approver sees in the UI,
+// short enough that revealing it to the agent doesn't let it guess the ID.
+func shortRequestID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
 // describeArgs summarizes tool arguments for the approver, omitting the
 // compose file (sent separately) and the approval token.
-func describeArgs(args map[string]any) string {
+func describeArgs(args map[string]any) (string, error) {
 	filtered := make(map[string]any, len(args))
 	for k, v := range args {
 		if k == "approvalToken" || k == "file" {
@@ -191,13 +214,12 @@ func describeArgs(args map[string]any) string {
 		}
 		filtered[k] = v
 	}
-	data, err := json.Marshal(filtered)
+	data, err := json.MarshalIndent(filtered, "", "  ")
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to encode arguments: %w", err)
 	}
-	s := string(data)
-	if len(s) > maxDescriptionLen {
-		s = s[:maxDescriptionLen] + "…"
+	if len(data) > maxDescriptionLen {
+		return "", fmt.Errorf("arguments are too large to show the approver (%d bytes, limit %d)", len(data), maxDescriptionLen)
 	}
-	return s
+	return string(data), nil
 }

@@ -397,6 +397,7 @@ towline approvals serve
 
 ```bash
 towline approvals list
+towline approvals show <id>
 towline approvals approve <id>
 towline approvals reject <id>
 ```
@@ -410,7 +411,7 @@ These prompt for the approver token on stdin. It is deliberately not read from a
 | `--mode human\|agent` | Approval mode (prompted if omitted) |
 | `--listen <addr>` | Listen address for the built-in server (default `127.0.0.1:8787`). A warning is printed when it listens beyond localhost — put it behind an HTTPS reverse proxy. `approvals serve --listen` overrides it for one run. |
 | `--ntfy <topic URL>` | Send a push notification per request, e.g. `https://ntfy.sh/<private-topic>` |
-| `--public-url <url>` | Where you open the UI, used for the link in notifications |
+| `--public-url <url>` | Where you open the UI: used for the link in notifications, and needed for UI login behind a reverse proxy |
 | `--url <url>` | Use an external approval server instead of the built-in one |
 | `--webhook-token <token>` | Bearer token for the approval server (generated if empty) |
 
@@ -445,7 +446,7 @@ When the agent calls a gated tool, the first call returns `Production operation 
 
 When the agent tries to perform a gated operation:
 
-1. `towline-mcp` sends the request to the approval server and returns `Production operation requires human approval` with an `approvalToken` (the request ID)
+1. `towline-mcp` sends the request to the approval server and returns `Production operation requires human approval` with an `approvalToken` and the short request ID you'll see in the UI
 2. The agent tells you what it wants to do and waits
 3. You approve (or reject) it — in the web UI, with `towline approvals approve <id>`, or via the ntfy notification link
 4. The agent re-calls the tool with identical arguments plus the `approvalToken`
@@ -696,7 +697,7 @@ approval:
 | `towline refresh [--all \| <name>...] [--keep-role]` | Bring existing projects up to date with this release. See [Upgrading](#upgrading). |
 | `towline approvals setup` | Choose human or agent approval for prod operations. |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`). |
-| `towline approvals list \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
+| `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
 | `towline update [--check] [--force]` | Update Towline to the latest release. |
 | `towline promote <name>` | Create prod tier from dev. *(Coming soon)* |
 | `towline rotate-keys <name>` | Rotate API keys. *(Coming soon)* |

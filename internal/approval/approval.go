@@ -17,10 +17,16 @@ const (
 )
 
 type PendingApproval struct {
+	// RequestID identifies the request on the approval server. It is never
+	// shown to the agent, so an agent that can reach the server cannot
+	// submit its own request under that ID and have it approved in place of
+	// the real one (e.g. after the server restarts and forgets it).
+	RequestID string
 	ToolName  string
 	Args      map[string]any
 	ArgsHash  string
 	CreatedAt time.Time
+	claimed   bool
 }
 
 type Store struct {
@@ -42,6 +48,7 @@ func (s *Store) Request(toolName string, args map[string]any) string {
 	token := generateToken()
 	s.mu.Lock()
 	s.pending[token] = &PendingApproval{
+		RequestID: generateToken(),
 		ToolName:  toolName,
 		Args:      args,
 		ArgsHash:  hashArgs(args),
@@ -93,6 +100,38 @@ func (s *Store) Peek(token string, currentArgs map[string]any) *PendingApproval 
 		return nil
 	}
 	return p
+}
+
+// Claim is Peek for a caller about to act on the token: it also marks the
+// token in use, so concurrent re-calls with the same token cannot all
+// proceed. The caller must Consume or Release it. Returns nil if the token is
+// unknown, expired, mismatched, or already claimed.
+func (s *Store) Claim(token string, currentArgs map[string]any) *PendingApproval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, ok := s.pending[token]
+	if !ok || p.claimed {
+		return nil
+	}
+	if time.Since(p.CreatedAt) > TokenTTL {
+		delete(s.pending, token)
+		return nil
+	}
+	if hashArgs(currentArgs) != p.ArgsHash {
+		return nil
+	}
+	p.claimed = true
+	return p
+}
+
+// Release returns a claimed token so it can be used again later.
+func (s *Store) Release(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.pending[token]; ok {
+		p.claimed = false
+	}
 }
 
 // Consume removes a token so it cannot be used again.

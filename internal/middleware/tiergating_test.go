@@ -108,7 +108,11 @@ func TestTierGating_ProdSubmitsRequest(t *testing.T) {
 
 	require.Len(t, approver.submitted, 1)
 	req := approver.submitted[0]
-	assert.Equal(t, extractToken(t, text), req.ID)
+	// The server-side ID is secret: the agent only sees its token and a
+	// short prefix of the ID.
+	assert.NotEqual(t, extractToken(t, text), req.ID)
+	assert.NotContains(t, text, req.ID)
+	assert.Contains(t, text, req.ID[:8])
 	assert.Equal(t, "myapp-prod", req.Project)
 	assert.Equal(t, "updateLocalStack", req.Action)
 	assert.Equal(t, "services: {}\n", req.StackContent)
@@ -314,4 +318,70 @@ func TestResolveApprovalMode(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, tt.want, got, "%q webhook=%v", tt.explicit, tt.webhook)
 	}
+}
+
+// An agent that can reach the approval server must not be able to get its
+// token approved by submitting a different request under the token's ID
+// (e.g. after the server restarted and forgot the real request).
+func TestTierGating_ProdForgedRequestUnderTokenIDDoesNotAuthorize(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	handler := NewTierGating(TierProd, newGate(t, approver), "updateLocalStack")(passthroughHandler())
+
+	args := map[string]any{"id": 1, "file": "services: {evil: {}}\n"}
+	result, err := handler(context.Background(), makeRequest(args))
+	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
+
+	// The server forgets the real request; the agent submits a harmless
+	// looking one under the token, and a human approves it.
+	approver.submitted = []approval.Request{{ID: token, Action: "towline_scale"}}
+	approver.status = approval.StatusApproved
+
+	recall := map[string]any{"id": 1, "file": "services: {evil: {}}\n", "approvalToken": token}
+	result, err = handler(context.Background(), makeRequest(recall))
+	require.NoError(t, err)
+	assert.NotEqual(t, "executed", resultText(result))
+}
+
+func TestTierGating_ProdApprovedTokenRunsOnce(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	var mu sync.Mutex
+	runs := 0
+	next := func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		mu.Lock()
+		runs++
+		mu.Unlock()
+		return mcp.NewToolResultText("executed"), nil
+	}
+	handler := NewTierGating(TierProd, newGate(t, approver), "towline_exec")(next)
+
+	result, err := handler(context.Background(), makeRequest(map[string]any{"command": "id"}))
+	require.NoError(t, err)
+	token := extractToken(t, resultText(result))
+	approver.status = approval.StatusApproved
+
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = handler(context.Background(), makeRequest(map[string]any{"command": "id", "approvalToken": token}))
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, 1, runs)
+}
+
+func TestTierGating_ProdOversizedArgsRefused(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	handler := NewTierGating(TierProd, newGate(t, approver), "towline_exec")(passthroughHandler())
+
+	// Padding must not push the real arguments out of what the approver sees.
+	result, err := handler(context.Background(), makeRequest(map[string]any{
+		"aaa":     strings.Repeat("x", maxDescriptionLen),
+		"command": "rm -rf /data",
+	}))
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Empty(t, approver.submitted)
 }

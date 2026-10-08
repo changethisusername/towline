@@ -194,7 +194,7 @@ Agent: [re-calls with the token] → [deploys] → [verifies health] → "All se
 ```
 
 - `approvals setup` generates a **webhook token** (put in the generated MCP config as `TOWLINE_APPROVAL_WEBHOOK_TOKEN`; it can only submit and poll requests, never approve) and an **approver token**, shown once (only its SHA-256 is stored). Use the approver token to log in to the UI or with `towline approvals list | approve <id> | reject <id>`, which prompt for it on stdin — deliberately not read from env vars or flags, so agents in the same shell can't pick it up.
-- Optional: `--ntfy <topic URL>` for push notifications, `--public-url` for the link in them, `--listen` to change the address (a warning is printed if it listens beyond localhost — put it behind HTTPS).
+- Optional: `--ntfy <topic URL>` for push notifications, `--public-url` for the link in them (and set it when the UI sits behind a reverse proxy), `--listen` to change the address (a warning is printed if it listens beyond localhost — put it behind HTTPS).
 - The built-in server keeps requests in memory: restarting it drops pending requests (the agent just requests again).
 - To use your own server instead: `towline approvals setup --mode human --url <server> [--webhook-token <token>]`. It must implement:
 
@@ -281,7 +281,7 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 | `towline refresh [--all \| <name>...]` | Bring existing projects up to date with this release (see [Upgrading](#upgrading)) |
 | `towline approvals setup` | Choose human or agent approval for prod operations |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`) |
-| `towline approvals list \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
+| `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
 | `towline update` | Update Towline to the latest release |
 | `towline promote <name>` | Add prod tier *(coming soon)* |
 | `towline rotate-keys <name>` | Rotate API credentials *(coming soon)* |
