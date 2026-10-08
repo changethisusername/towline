@@ -129,15 +129,18 @@ After a successful `deleteLocalStack`, the agent can call `createLocalStack` aga
 
 In both dev and prod, `createLocalStack` and `updateLocalStack` reject compose files that could give a container access to the host:
 
-- `privileged`, `cap_add`, `devices`
-- `network_mode: host` or `container:...`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`
+- `privileged` (also on `post_start` / `pre_stop` hooks), `cap_add`, `devices`
+- `deploy.resources.reservations.devices` other than GPU reservations (`capabilities: [gpu]`, driver `nvidia`)
+- `network_mode` other than `bridge` or `none`; `host` or `container:...` for `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`
 - `security_opt` with `unconfined` or `disable`
 - Host bind mounts — absolute, relative (`./`), `~`, or `${VAR}` sources, and long-syntax `type: bind`
 - `volumes_from`
-- Volumes with `driver_opts` or a non-`local` driver
+- Volumes with `driver_opts`, a non-`local` driver, `external` or `name` (they could mount another project's volume)
+- Networks with `external`, `name`, `driver_opts`, or a driver other than `bridge` / `overlay`
 - `secrets` / `configs` with `file:`
 - `env_file` outside the stack directory
 - Top-level `include` / `extends`
+- More than one YAML document (`---`) in the file
 
 Named volumes and `tmpfs` are fine. Rejection messages tell the agent to ask you if the stack genuinely needs the setting.
 
