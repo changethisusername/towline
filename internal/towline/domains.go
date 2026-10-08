@@ -204,7 +204,19 @@ func (h *Handlers) HandleDomainsAdd() server.ToolHandlerFunc {
 			return mcp.NewToolResultText(result), nil
 		}
 
-		// Caddy: route was added via API, no compose change needed
+		// Caddy: the route was added via API. It dials a project-unique
+		// network alias, which Add put into the compose if it was missing;
+		// deploy that so the route resolves to this stack only.
+		if result != previousCompose {
+			desc := fmt.Sprintf("Add domain %s -> %s:%d via caddy (network alias %s)", domain, service, port, proxy.CaddyUpstreamHost(h.StackName, service))
+			if err := h.updateComposeFile(stackID, previousCompose, result, desc); err != nil {
+				if _, rmErr := mgr.Remove(previousCompose, service, domain); rmErr != nil {
+					return mcp.NewToolResultErrorFromErr(fmt.Sprintf("failed to redeploy compose with the network alias, and failed to remove the Caddy route again (%v)", rmErr), err), nil
+				}
+				return mcp.NewToolResultErrorFromErr("failed to redeploy compose with the network alias; the Caddy route was removed again", err), nil
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Domain %s added to service %s (port %d) via Caddy; the service was redeployed with network alias %s, which the route dials", domain, service, port, proxy.CaddyUpstreamHost(h.StackName, service))), nil
+		}
 		return mcp.NewToolResultText(fmt.Sprintf("Domain %s added to service %s (port %d) via Caddy", domain, service, port)), nil
 	}
 }

@@ -226,6 +226,8 @@ If you use Caddy, start `towline-mcp` with the `-caddy-api` flag pointing to you
 
 Routes are managed via Caddy's admin API. TLS is handled automatically by Caddy.
 
+Routes dial `<service>.<stack>.towline:<port>`, a network alias that `towline_domains_add` adds to the service on each of its networks (redeploying the stack when it was missing). Dialing the bare service name would let Docker DNS on Caddy's shared network resolve to another project's container with the same service name. Caddy must share a network with the service. Routes created by older versions still dial the bare service name; remove and re-add them to switch.
+
 Because a Caddy instance is usually shared between projects, routes are namespaced per stack with IDs of the form `towline:<stack>:<service>:<domain>`. A project only sees and removes its own routes, the service must exist in the stack's compose file, and a hostname already routed by any other route cannot be claimed. Routes created by older Towline versions (IDs `towline-<service>-<domain>`) are no longer listed or managed — remove them manually via Caddy's admin API.
 
 ### Cloudflare Tunnels
