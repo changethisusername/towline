@@ -18,7 +18,8 @@ tools:
 
   - name: towline_service_logs
     description: >
-      Fetch recent log output for a named service. Strips Docker binary framing headers.
+      Fetch recent log output for a named service. Strips Docker binary framing
+      headers (TTY output is returned as-is).
     parameters:
       - name: service
         description: Service name from docker-compose
@@ -28,7 +29,7 @@ tools:
         description: Number of lines to return (default 200)
         type: number
       - name: since
-        description: Only return logs after this RFC3339 timestamp
+        description: Only return logs after this time. An RFC3339 timestamp (2026-01-02T15:04:05Z), a duration meaning that long ago (10m, 2h), or unix seconds
         type: string
       - name: filter
         description: Filter log lines containing this string
