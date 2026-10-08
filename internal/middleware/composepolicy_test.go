@@ -276,6 +276,7 @@ func TestComposePolicy_ReservedTowlineNames(t *testing.T) {
 		{name: "another service's alias", compose: "services:\n  worker:\n    image: x\n    networks:\n      default:\n        aliases: [web.shop.towline]\n", wantErr: true},
 		{name: "case variant", compose: "services:\n  web:\n    image: x\n    networks:\n      default:\n        aliases: [WEB.victim.TOWLINE]\n", wantErr: true},
 		{name: "container_name", compose: "services:\n  web:\n    image: x\n    container_name: web.victim.towline\n", wantErr: true},
+		{name: "service named as another stack's alias", compose: "services:\n  web.victim.towline:\n    image: x\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

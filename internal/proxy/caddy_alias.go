@@ -10,8 +10,10 @@ import (
 // service. Docker DNS resolves a bare service name to every container with
 // that name or alias on the network, and Caddy's network is shared between
 // projects, so a bare name can send one project's traffic to another
-// project's "web". Service names cannot contain '.', so this name cannot be
-// produced by any other (stack, service) pair.
+// project's "web". Routed service names and stack names cannot contain '.', so
+// this name cannot be produced by any other (stack, service) pair, and the
+// compose policy stops other stacks from claiming it as a service name,
+// container name or alias.
 func CaddyUpstreamHost(stackName, service string) string {
 	return service + "." + stackName + ".towline"
 }

@@ -256,6 +256,10 @@ func (p ComposePolicy) validateService(name string, svc map[string]any) []string
 		}
 	}
 
+	// Compose also registers the service name itself as a DNS alias.
+	if strings.HasSuffix(strings.ToLower(name), ".towline") {
+		add("service name %q is reserved: names under .towline are used for routing", name)
+	}
 	for _, n := range dnsNames(svc) {
 		if strings.HasSuffix(strings.ToLower(n), ".towline") && (p.StackName == "" || n != name+"."+p.StackName+".towline") {
 			add("name %q is reserved: only %q may be used under .towline", n, name+"."+p.StackName+".towline")

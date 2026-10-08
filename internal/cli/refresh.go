@@ -216,7 +216,7 @@ func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI
 	}
 	policy.AllowNetworks = existingNetworks(compose)
 
-	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts, AllowNetworks: policy.AllowNetworks}.Validate(compose)
+	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts, AllowNetworks: policy.AllowNetworks, StackName: pc.StackName}.Validate(compose)
 	if len(remaining) > 0 {
 		fmt.Println("  warning: the deployed compose file uses settings the compose policy rejects, so the")
 		fmt.Println("  agent's next updateLocalStack will fail until they are removed:")
