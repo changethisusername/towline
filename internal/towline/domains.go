@@ -32,24 +32,35 @@ func (h *Handlers) getComposeFile() (string, int, error) {
 	return "", 0, fmt.Errorf("stack %q not found", h.StackName)
 }
 
-// updateComposeFile deploys the updated compose content back to Portainer.
-func (h *Handlers) updateComposeFile(stackID int, compose string) error {
+// updateComposeFile deploys the updated compose content back to Portainer,
+// recording a deployment history entry in the same stack update (so the
+// change and its history cannot be split by a concurrent update, and the
+// stack is not redeployed a second time just to write the history).
+// Callers must hold h.stackMu across the read that produced previousCompose
+// and this call.
+func (h *Handlers) updateComposeFile(stackID int, previousCompose, compose, description string) error {
 	stacks, err := h.Server.Client().GetLocalStacks()
 	if err != nil {
 		return fmt.Errorf("failed to get stacks: %w", err)
 	}
 
-	var envVars []models.LocalStackEnvVar
-	var endpointID int
-	for _, s := range stacks {
-		if s.ID == stackID {
-			envVars = s.Env
-			endpointID = s.EndpointID
+	var stack *models.LocalStack
+	for i := range stacks {
+		if stacks[i].ID == stackID {
+			stack = &stacks[i]
 			break
 		}
 	}
+	if stack == nil {
+		return fmt.Errorf("stack %d not found", stackID)
+	}
 
-	return h.Server.Client().UpdateLocalStack(stackID, endpointID, compose, envVars, false, false)
+	envVars, err := appendDeploymentEntry(stack.Env, description, previousCompose, compose, "success")
+	if err != nil {
+		return err
+	}
+
+	return h.Server.Client().UpdateLocalStack(stackID, stack.EndpointID, compose, envVars, false, false)
 }
 
 // getProxyManager returns the appropriate proxy backend based on the method parameter.
@@ -148,6 +159,9 @@ func (h *Handlers) HandleDomainsAdd() server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		h.stackMu.Lock()
+		defer h.stackMu.Unlock()
+
 		compose, stackID, err := h.getComposeFile()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to get compose file", err), nil
@@ -177,15 +191,10 @@ func (h *Handlers) HandleDomainsAdd() server.ToolHandlerFunc {
 		}
 
 		if effectiveMethod == proxy.BackendTraefik {
-			if err := h.updateComposeFile(stackID, result); err != nil {
+			desc := fmt.Sprintf("Add domain %s -> %s:%d via traefik", domain, service, port)
+			if err := h.updateComposeFile(stackID, previousCompose, result, desc); err != nil {
 				return mcp.NewToolResultErrorFromErr("failed to redeploy compose", err), nil
 			}
-
-			// Record deployment
-			_ = h.RecordDeployment(
-				fmt.Sprintf("Add domain %s -> %s:%d via traefik", domain, service, port),
-				previousCompose, result, "success",
-			)
 
 			return mcp.NewToolResultText(fmt.Sprintf("Domain %s added to service %s (port %d) via Traefik and redeployed", domain, service, port)), nil
 		}
@@ -225,6 +234,9 @@ func (h *Handlers) HandleDomainsRemove() server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		h.stackMu.Lock()
+		defer h.stackMu.Unlock()
+
 		compose, stackID, err := h.getComposeFile()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to get compose file", err), nil
@@ -253,14 +265,10 @@ func (h *Handlers) HandleDomainsRemove() server.ToolHandlerFunc {
 		}
 
 		if effectiveMethod == proxy.BackendTraefik {
-			if err := h.updateComposeFile(stackID, result); err != nil {
+			desc := fmt.Sprintf("Remove domain %s from %s via traefik", domain, service)
+			if err := h.updateComposeFile(stackID, previousCompose, result, desc); err != nil {
 				return mcp.NewToolResultErrorFromErr("failed to redeploy compose", err), nil
 			}
-
-			_ = h.RecordDeployment(
-				fmt.Sprintf("Remove domain %s from %s via traefik", domain, service),
-				previousCompose, result, "success",
-			)
 
 			return mcp.NewToolResultText(fmt.Sprintf("Domain %s removed from service %s via Traefik and redeployed", domain, service)), nil
 		}

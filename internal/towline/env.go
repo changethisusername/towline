@@ -140,6 +140,9 @@ func (h *Handlers) HandleEnvSet() server.ToolHandlerFunc {
 			return mcp.NewToolResultError("cannot set internal _TOWLINE_* variables"), nil
 		}
 
+		h.stackMu.Lock()
+		defer h.stackMu.Unlock()
+
 		// Get current stacks
 		stacks, err := h.Server.Client().GetLocalStacks()
 		if err != nil {

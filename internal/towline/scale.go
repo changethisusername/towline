@@ -31,6 +31,9 @@ func (h *Handlers) HandleScale() server.ToolHandlerFunc {
 			return mcp.NewToolResultError("replicas must be >= 0"), nil
 		}
 
+		h.stackMu.Lock()
+		defer h.stackMu.Unlock()
+
 		compose, stackID, err := h.getComposeFile()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to get compose file", err), nil
@@ -43,14 +46,10 @@ func (h *Handlers) HandleScale() server.ToolHandlerFunc {
 			return mcp.NewToolResultErrorFromErr("failed to update replicas", err), nil
 		}
 
-		if err := h.updateComposeFile(stackID, updatedCompose); err != nil {
+		desc := fmt.Sprintf("Scale %s to %d replicas", service, replicas)
+		if err := h.updateComposeFile(stackID, previousCompose, updatedCompose, desc); err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to redeploy compose", err), nil
 		}
-
-		_ = h.RecordDeployment(
-			fmt.Sprintf("Scale %s to %d replicas", service, replicas),
-			previousCompose, updatedCompose, "success",
-		)
 
 		msg := fmt.Sprintf("Service %s scaled to %d replicas", service, replicas)
 		if warning != "" {
