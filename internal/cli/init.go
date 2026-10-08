@@ -2,6 +2,7 @@ package cli
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
@@ -24,11 +25,15 @@ func runInit(args []string) error {
 		return err
 	}
 
-	if fs.NArg() < 1 {
+	positional, err := positionalArgs(fs)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
 		return fmt.Errorf("usage: towline init [--tier dev|prod] [--template name] <project-name>")
 	}
 
-	projectName := fs.Arg(0)
+	projectName := positional[0]
 	if err := validateProjectName(projectName); err != nil {
 		return err
 	}
@@ -57,6 +62,9 @@ func runInit(args []string) error {
 
 	if existingDir {
 		projectDir = cwd
+		if err := checkExistingDir(projectDir); err != nil {
+			return err
+		}
 		fmt.Printf("Adding Towline to existing project '%s' in %s\n", projectName, projectDir)
 	} else {
 		projectDir = filepath.Join(globalCfg.ProjectsDir, projectName)
@@ -137,10 +145,23 @@ func runInit(args []string) error {
 		templates = append([]projectTemplate{{"gitignore.tmpl", filepath.Join(projectDir, ".gitignore"), publicFileMode}}, templates...)
 	}
 
+	serverName := "towline-" + *tier
 	for _, t := range templates {
-		if err := renderTemplate(t.name, data, t.output, t.perm); err != nil {
+		// An existing codebase may already have agent configs of its own:
+		// add the towline entries to them instead of replacing them.
+		_, statErr := os.Stat(t.output)
+		var err error
+		switch {
+		case !existingDir || statErr != nil:
+			err = renderTemplate(t.name, data, t.output, t.perm)
+		case t.name == "claude-settings.tmpl":
+			err = ensureClaudePermission(t.output, "mcp__"+serverName)
+		default:
+			err = mergeMCPServer(t.output, t.name, serverName, data)
+		}
+		if err != nil {
 			cleanupPortainer()
-			return fmt.Errorf("failed to render %s: %w", t.name, err)
+			return fmt.Errorf("failed to write %s: %w", t.output, err)
 		}
 	}
 
@@ -199,6 +220,7 @@ func runInit(args []string) error {
 		}
 
 		if err := os.WriteFile(filepath.Join(projectDir, ".env.example"), []byte("# Environment variables for "+projectName+"\n"), 0644); err != nil {
+			cleanupPortainer()
 			return fmt.Errorf("failed to create .env.example: %w", err)
 		}
 	} else {
@@ -239,6 +261,7 @@ func runInit(args []string) error {
 		},
 	}
 	if err := config.SaveProjectConfig(projectDir, projectCfg); err != nil {
+		cleanupPortainer()
 		return fmt.Errorf("failed to save project config: %w", err)
 	}
 
@@ -444,6 +467,30 @@ func isExistingCodebase(dir string) bool {
 		}
 	}
 	return false
+}
+
+// checkExistingDir refuses to add Towline to an existing codebase when that
+// would orphan an earlier project or write the token into files git tracks.
+// It runs before anything is created in Portainer.
+func checkExistingDir(dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, "towline.json")); err == nil {
+		return fmt.Errorf("%s already has a towline.json: it is already a Towline project. Use 'towline refresh' to update it, or 'towline destroy' and remove towline.json to start over", dir)
+	}
+	if tracked := trackedSecrets(dir); len(tracked) > 0 {
+		return fmt.Errorf("these files would hold the project's Portainer token but are tracked by git: %s\nUntrack them first with 'git rm --cached -r -- %s' (they will be added to .gitignore), then run init again",
+			strings.Join(tracked, ", "), strings.Join(tracked, " "))
+	}
+	for _, rel := range []string{".mcp.json", filepath.Join(".claude", "settings.json"), filepath.Join(".cursor", "mcp.json"), filepath.Join(".gemini", "settings.json")} {
+		raw, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			continue
+		}
+		var v map[string]any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return fmt.Errorf("%s is not valid JSON, so the towline entry can't be added to it: %w", rel, err)
+		}
+	}
+	return nil
 }
 
 // generatePassword generates a random password of the given length.

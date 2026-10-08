@@ -435,3 +435,133 @@ func TestInit_UnknownTemplateCreatesNothing(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// setupExistingCodebase configures towline against portainerURL and changes
+// into a fresh git repository that looks like an existing codebase.
+func setupExistingCodebase(t *testing.T, portainerURL string) (projects, dir string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	projects = filepath.Join(home, "projects")
+	require.NoError(t, config.SaveGlobalConfig(&config.GlobalConfig{
+		PortainerURL: portainerURL, PortainerAPIKey: "ptr_admin", PortainerEnvID: 1,
+		ProjectsDir: projects, SkipTLSVerify: boolPtr(false),
+	}))
+	dir = t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0644))
+	require.NoError(t, exec.Command("git", "-C", dir, "init", "-q").Run())
+	t.Chdir(dir)
+	return projects, dir
+}
+
+func gitCommitAll(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, exec.Command("git", "-C", dir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", dir, "commit", "-q", "-m", "x").Run())
+}
+
+func TestInit_ExistingCodebaseRefusals(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, dir string)
+		wantErr string
+	}{
+		{
+			name: "already a towline project",
+			prepare: func(t *testing.T, dir string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "towline.json"), []byte(`{"stack_name":"old-dev"}`), 0600))
+			},
+			wantErr: "already has a towline.json",
+		},
+		{
+			name: "mcp config tracked by git",
+			prepare: func(t *testing.T, dir string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{}`), 0644))
+				gitCommitAll(t, dir)
+			},
+			wantErr: "git rm --cached",
+		},
+		{
+			name: "claude settings tracked by git",
+			prepare: func(t *testing.T, dir string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(`{}`), 0644))
+				gitCommitAll(t, dir)
+			},
+			wantErr: ".claude/settings.json",
+		},
+		{
+			name: "unparsable mcp config",
+			prepare: func(t *testing.T, dir string) {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{nope`), 0600))
+			},
+			wantErr: "not valid JSON",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePortainer()
+			srv := httptest.NewServer(f.handler(t))
+			defer srv.Close()
+			_, dir := setupExistingCodebase(t, srv.URL)
+			tt.prepare(t, dir)
+
+			err := runInit([]string{"app"})
+			assert.ErrorContains(t, err, tt.wantErr)
+			assert.Empty(t, f.requests, "nothing should be created in Portainer")
+		})
+	}
+}
+
+func TestInit_ExistingCodebaseMergesAgentConfigs(t *testing.T) {
+	f := newFakePortainer()
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	_, dir := setupExistingCodebase(t, srv.URL)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".mcp.json"),
+		[]byte(`{"mcpServers": {"github": {"command": "gh-mcp", "args": []}}}`), 0600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "settings.json"),
+		[]byte(`{"permissions": {"allow": ["Bash(npm test)"]}, "model": "x"}`), 0600))
+
+	require.NoError(t, runInit([]string{"app"}))
+
+	_, env, servers := readMCPServer(t, filepath.Join(dir, ".mcp.json"), "towline-dev")
+	assert.Contains(t, servers, "github", "existing MCP servers are kept")
+	assert.Equal(t, "ptr_project", env["TOWLINE_PORTAINER_TOKEN"])
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "Bash(npm test)")
+	assert.Contains(t, string(raw), `"model": "x"`)
+	assert.Contains(t, string(raw), "mcp__towline-dev")
+
+	_, err = os.Stat(filepath.Join(dir, "towline.json"))
+	assert.NoError(t, err)
+}
+
+func TestFlagsAfterProjectName(t *testing.T) {
+	tests := []struct {
+		name    string
+		run     func([]string) error
+		args    []string
+		wantErr string
+	}{
+		{"init flag after name", runInit, []string{"app", "--tier", "prod"}, "flags must come before the project name"},
+		{"init extra positional", runInit, []string{"app", "other"}, "usage: towline init"},
+		{"refresh flag after name", runRefresh, []string{"app", "--keep-role"}, "flags must come before the project name"},
+		{"destroy flag after name", runDestroy, []string{"app", "--confirm"}, "flags must come before the project name"},
+		{"destroy extra positional", runDestroy, []string{"app", "other"}, "usage: towline destroy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			assert.ErrorContains(t, tt.run(tt.args), tt.wantErr)
+		})
+	}
+}

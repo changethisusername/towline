@@ -41,6 +41,10 @@ func runRefresh(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	names, err := positionalArgs(fs)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.LoadGlobalConfig()
 	if err != nil {
@@ -60,8 +64,8 @@ func runRefresh(args []string) error {
 				dirs = append(dirs, dir)
 			}
 		}
-	case fs.NArg() > 0:
-		for _, name := range fs.Args() {
+	case len(names) > 0:
+		for _, name := range names {
 			if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
 				return fmt.Errorf("invalid project name %q", name)
 			}

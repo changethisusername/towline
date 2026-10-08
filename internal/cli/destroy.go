@@ -19,11 +19,15 @@ func runDestroy(args []string) error {
 		return err
 	}
 
-	if fs.NArg() < 1 {
+	positional, err := positionalArgs(fs)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
 		return fmt.Errorf("usage: towline destroy [--confirm] <project-name>")
 	}
 
-	projectName := fs.Arg(0)
+	projectName := positional[0]
 	// Projects created before name validation may not match the init
 	// rules, so only reject names that could point outside the projects dir.
 	if projectName == "" || projectName == "." || projectName == ".." || strings.ContainsAny(projectName, `/\`) {

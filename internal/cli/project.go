@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,4 +64,16 @@ func resolveMCPBinary() string {
 // projectNameFromStack derives the project name from a <project>-<tier> stack name.
 func projectNameFromStack(stackName, tier string) string {
 	return strings.TrimSuffix(stackName, "-"+tier)
+}
+
+// positionalArgs returns the arguments left after fs.Parse. The flag package
+// stops at the first non-flag argument, so a flag placed after the project
+// name would otherwise be ignored without a word.
+func positionalArgs(fs *flag.FlagSet) ([]string, error) {
+	for _, a := range fs.Args() {
+		if strings.HasPrefix(a, "-") && a != "-" {
+			return nil, fmt.Errorf("flags must come before the project name (%q was given after it)", a)
+		}
+	}
+	return fs.Args(), nil
 }
