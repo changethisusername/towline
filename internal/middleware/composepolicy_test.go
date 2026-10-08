@@ -69,6 +69,36 @@ volumes:
 		{name: "merge key privileged", compose: "x-base: &b\n  privileged: true\nservices:\n  a:\n    <<: *b\n    image: x\n", wantErr: "privileged"},
 		{name: "include", compose: "include:\n  - /etc/compose.yml\nservices: {}\n", wantErr: "include"},
 		{name: "invalid yaml", compose: "services: [", wantErr: "not valid YAML"},
+		{name: "empty file allowed", compose: ""},
+		{name: "leading document marker allowed", compose: "---\nservices:\n  a:\n    image: x\n"},
+		{name: "second document", compose: "services:\n  a:\n    image: x\n---\nservices:\n  a:\n    privileged: true\n", wantErr: "single YAML document"},
+		{name: "trailing empty document", compose: "services:\n  a:\n    image: x\n---\n", wantErr: "single YAML document"},
+		{name: "invalid second document", compose: "services: {}\n---\nservices: [\n", wantErr: "single YAML document"},
+		{name: "external volume", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    external: true\n", wantErr: `volume "v": "external" is not allowed`},
+		{name: "external volume false", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    external: false\n", wantErr: `"external" is not allowed`},
+		{name: "named volume of another project", compose: "services:\n  a:\n    image: x\n    volumes: [\"v:/d\"]\nvolumes:\n  v:\n    name: otherapp_db_data\n", wantErr: `volume "v": "name" is not allowed`},
+		{name: "local volume driver allowed", compose: "services:\n  a:\n    image: x\nvolumes:\n  v:\n    driver: local\n  w: {}\n"},
+		{name: "external network", compose: "services:\n  a:\n    image: x\n    networks: [n]\nnetworks:\n  n:\n    external: true\n", wantErr: `network "n": external network "n" is not allowed`},
+		{name: "named network of another project", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    name: otherapp_default\n", wantErr: `external network "otherapp_default" is not allowed`},
+		{name: "network driver_opts", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver_opts:\n      parent: eth0\n", wantErr: "driver_opts"},
+		{name: "host network driver", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver: host\n", wantErr: "only the bridge and overlay"},
+		{name: "macvlan network driver", compose: "services:\n  a:\n    image: x\nnetworks:\n  n:\n    driver: macvlan\n", wantErr: "only the bridge and overlay"},
+		{name: "bridge networks allowed", compose: "services:\n  a:\n    image: x\n    networks: [front, back]\nnetworks:\n  front:\n  back:\n    driver: bridge\n  swarm:\n    driver: overlay\n"},
+		{name: "network_mode none allowed", compose: "services:\n  a:\n    image: x\n    network_mode: none\n"},
+		{name: "network_mode other network", compose: "services:\n  a:\n    image: x\n    network_mode: otherapp_default\n", wantErr: `network_mode "otherapp_default" is not allowed`},
+		{name: "network_mode service", compose: "services:\n  a:\n    image: x\n    network_mode: \"service:b\"\n", wantErr: "network_mode"},
+		{name: "network_mode interpolated", compose: "services:\n  a:\n    image: x\n    network_mode: ${MODE}\n", wantErr: "network_mode"},
+		{name: "network_mode non-string", compose: "services:\n  a:\n    image: x\n    network_mode: [host]\n", wantErr: "network_mode"},
+		{name: "privileged post_start hook", compose: "services:\n  a:\n    image: x\n    post_start:\n      - command: id\n        privileged: true\n", wantErr: "post_start hook privileged mode is not allowed"},
+		{name: "privileged pre_stop hook", compose: "services:\n  a:\n    image: x\n    pre_stop:\n      - command: id\n        privileged: ${P}\n", wantErr: "pre_stop hook privileged mode is not allowed"},
+		{name: "unprivileged hooks allowed", compose: "services:\n  a:\n    image: x\n    post_start:\n      - command: ./init.sh\n        user: root\n    pre_stop:\n      - command: ./drain.sh\n        privileged: false\n"},
+		{name: "hook not a list", compose: "services:\n  a:\n    image: x\n    post_start: {command: id, privileged: true}\n", wantErr: "post_start must be a list"},
+		{name: "gpu reservation allowed", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - capabilities: [gpu]\n              count: all\n            - driver: nvidia\n              device_ids: [\"0\"]\n              capabilities: [gpu, compute, utility]\n"},
+		{name: "cdi device reservation", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: cdi\n              device_ids: [\"vendor.com/device=all\"]\n              capabilities: [gpu]\n", wantErr: `driver "cdi"`},
+		{name: "device reservation options", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - capabilities: [gpu]\n              options: {x: y}\n", wantErr: `"options"`},
+		{name: "device reservation other capability", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - capabilities: [tpu]\n", wantErr: `capability "tpu"`},
+		{name: "device reservation without capabilities", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - count: 1\n", wantErr: "deploy.resources.reservations.devices"},
+		{name: "device reservation not a list", compose: "services:\n  a:\n    image: x\n    deploy:\n      resources:\n        reservations:\n          devices: /dev/sda\n", wantErr: "deploy.resources.reservations.devices value"},
 	}
 
 	for _, tt := range tests {
@@ -189,4 +219,47 @@ func TestBindMountSources(t *testing.T) {
 `
 	assert.Equal(t, []string{"/srv/a", "/var/run/docker.sock", "./cfg"}, BindMountSources(compose))
 	assert.Nil(t, BindMountSources("services: ["))
+}
+
+func TestComposePolicy_AllowNetworks(t *testing.T) {
+	policy := ComposePolicy{AllowNetworks: []string{"proxy", "traefik_public", "host", "bridge", "none"}}
+	tests := []struct {
+		name    string
+		network string // top-level network definition under "networks:"
+		wantErr string // empty means allowed
+	}{
+		{name: "allowed external by key", network: "  proxy:\n    external: true\n"},
+		{name: "allowed by name", network: "  web:\n    name: traefik_public\n    external: true\n"},
+		{name: "name overrides key", network: "  proxy:\n    name: otherapp_default\n    external: true\n", wantErr: `external network "otherapp_default" is not allowed`},
+		{name: "not on allowlist", network: "  other:\n    external: true\n", wantErr: "compose_policy.allow_networks"},
+		{name: "host never allowed", network: "  host:\n    external: true\n", wantErr: `joining the "host" network is not allowed`},
+		{name: "bridge never allowed by name", network: "  n:\n    name: bridge\n", wantErr: `joining the "bridge" network is not allowed`},
+		{name: "none never allowed", network: "  n:\n    name: none\n    external: true\n", wantErr: `joining the "none" network is not allowed`},
+		{name: "interpolated name", network: "  proxy:\n    name: ${NET}\n    external: true\n", wantErr: "is not allowed"},
+		{name: "non-string name", network: "  proxy:\n    name: [proxy]\n", wantErr: "is not allowed"},
+		{name: "driver_opts still rejected", network: "  proxy:\n    external: true\n    driver_opts:\n      parent: eth0\n", wantErr: "driver_opts"},
+		{name: "driver still checked", network: "  proxy:\n    external: true\n    driver: macvlan\n", wantErr: "only the bridge and overlay"},
+		{name: "stack network unaffected", network: "  internal:\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compose := "services:\n  a:\n    image: x\nnetworks:\n" + tt.network
+			violations := policy.Validate(compose)
+			if tt.wantErr == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.NotEmpty(t, violations)
+			assert.Contains(t, strings.Join(violations, "\n"), tt.wantErr)
+		})
+	}
+
+	// Without an allowlist the strict default rejects external networks.
+	assert.NotEmpty(t, ValidateCompose("services:\n  a:\n    image: x\nnetworks:\n  proxy:\n    external: true\n"))
+}
+
+func TestExternalNetworkNames(t *testing.T) {
+	compose := "services: {}\nnetworks:\n  b:\n    external: true\n  a:\n    name: shared\n  c:\n  d: {}\n  e:\n    name: [x]\n"
+	assert.Equal(t, []string{"shared", "b"}, ExternalNetworkNames(compose))
+	assert.Nil(t, ExternalNetworkNames("networks: ["))
 }

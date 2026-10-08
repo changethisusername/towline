@@ -59,6 +59,7 @@ func main() {
 	approvalModeFlag := flag.String("approval-mode", "", "Who approves prod operations: human (approval server) or agent (the agent confirms by re-calling). Default: human if -approval-webhook is set, else agent")
 	composePolicyFlag := flag.String("compose-policy", "enforce", "Compose security policy for stack create/update: enforce or off")
 	allowBindMountsFlag := flag.String("allow-bind-mounts", "", "Comma-separated host paths that stacks may bind mount (\".\" allows paths inside the stack directory)")
+	allowNetworksFlag := flag.String("allow-networks", "", "Comma-separated external network names that stacks may join (host, none and bridge are never allowed)")
 
 	flag.Parse()
 
@@ -95,6 +96,11 @@ func main() {
 	for _, p := range strings.Split(*allowBindMountsFlag, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			composePolicy.AllowBindMounts = append(composePolicy.AllowBindMounts, p)
+		}
+	}
+	for _, n := range strings.Split(*allowNetworksFlag, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			composePolicy.AllowNetworks = append(composePolicy.AllowNetworks, n)
 		}
 	}
 
@@ -158,7 +164,13 @@ func main() {
 	} else if tier == middleware.TierProd {
 		log.Warn().Msg("agent approval mode: the agent confirms its own prod operations (run 'towline approvals setup' for human approval)")
 	}
-	stackScoping := middleware.NewStackScoping(*stackFlag)
+	// The stack ID and environment ID are resolved at startup; while either
+	// is unknown (the stack is not created yet, or Portainer was
+	// unreachable) they are looked up again on use.
+	stackScoping := middleware.NewStackScoping(*stackFlag, middleware.WithStackLookup(func() (int, bool) {
+		s, ok := findLocalStack(srv, *stackFlag)
+		return s.ID, ok
+	}))
 
 	// Resolve stack ID at startup
 	resolveStackID(srv, stackScoping, *stackFlag)
@@ -173,9 +185,10 @@ func main() {
 		return io.ReadAll(resp.Body)
 	}
 
-	// Get environment ID from first stack or default to 0
+	// Get environment ID from the stack, or 0 until the stack exists
 	envID := getEnvironmentID(srv, *stackFlag)
-	ownership := middleware.NewContainerOwnership(*stackFlag, envID, proxyFn)
+	envResolver := middleware.NewEnvResolver(envID, func() int { return getEnvironmentID(srv, *stackFlag) })
+	ownership := middleware.NewContainerOwnership(*stackFlag, envID, proxyFn, middleware.WithEnvResolver(envResolver))
 
 	// Create towline handlers
 	handlers := towline.NewHandlers(srv, *stackFlag, envID, proxyFn)
@@ -201,6 +214,11 @@ func main() {
 		// Container ownership (only for dockerProxy)
 		if toolName == "dockerProxy" {
 			mws = append(mws, ownership.ForDockerProxy())
+		}
+
+		// Innermost for towline tools: keep handlers.EnvID current
+		if strings.HasPrefix(toolName, "towline_") {
+			mws = append(mws, envResolver.Bind(&handlers.EnvID))
 		}
 
 		return mws
@@ -243,18 +261,25 @@ func resolveStackID(srv *mcp.PortainerMCPServer, scoping *middleware.StackScopin
 	log.Warn().Str("stack-name", stackName).Msg("stack not found, entering pending mode")
 }
 
-// getEnvironmentID extracts the environment ID from a local stack.
+// getEnvironmentID extracts the environment ID from a local stack, or
+// returns 0 if the stack is not found.
 func getEnvironmentID(srv *mcp.PortainerMCPServer, stackName string) int {
+	s, _ := findLocalStack(srv, stackName)
+	return s.EndpointID
+}
+
+// findLocalStack looks up the named local stack.
+func findLocalStack(srv *mcp.PortainerMCPServer, stackName string) (models.LocalStack, bool) {
 	stacks, err := srv.Client().GetLocalStacks()
 	if err != nil {
-		return 0
+		return models.LocalStack{}, false
 	}
 	for _, s := range stacks {
 		if s.Name == stackName {
-			return s.EndpointID
+			return s, true
 		}
 	}
-	return 0
+	return models.LocalStack{}, false
 }
 
 // registerWrappedUpstreamTools registers all upstream tools with middleware wrappers.

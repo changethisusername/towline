@@ -20,14 +20,14 @@ var generatedFlags = map[string]bool{
 	"-server": true, "-token": true, "-stack": true, "-tier": true,
 	"-disable-version-check": true, "-skip-tls-verify": true,
 	"-approval-mode": true, "-approval-webhook": true,
-	"-compose-policy": true, "-allow-bind-mounts": true,
+	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true,
 }
 
 // valueFlags are generated flags that take a value argument.
 var valueFlags = map[string]bool{
 	"-server": true, "-token": true, "-stack": true, "-tier": true,
 	"-approval-mode": true, "-approval-webhook": true,
-	"-compose-policy": true, "-allow-bind-mounts": true,
+	"-compose-policy": true, "-allow-bind-mounts": true, "-allow-networks": true,
 }
 
 // dangerousBindSources are never allowed automatically, even when an
@@ -112,6 +112,8 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 	// under the compose policy (only on the first refresh).
 	if pc.ComposePolicy == nil {
 		pc.ComposePolicy = grandfatherComposePolicy(api, pc)
+	} else if pc.ComposePolicy.AllowNetworks == nil {
+		grandfatherNetworks(api, pc)
 	}
 
 	if !keepRole {
@@ -165,7 +167,7 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 // uses, except ones that would hand over the host, and reports anything
 // else the compose policy would reject on the next update.
 func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig) *config.ComposePolicyConfig {
-	policy := &config.ComposePolicyConfig{Mode: "enforce"}
+	policy := &config.ComposePolicyConfig{Mode: "enforce", AllowNetworks: []string{}}
 	if pc.StackID == 0 {
 		return policy
 	}
@@ -189,8 +191,9 @@ func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig
 	if len(policy.AllowBindMounts) > 0 {
 		fmt.Printf("  Compose policy: allowed existing bind mounts %s\n", strings.Join(policy.AllowBindMounts, ", "))
 	}
+	policy.AllowNetworks = existingNetworks(compose)
 
-	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts}.Validate(compose)
+	remaining := middleware.ComposePolicy{AllowBindMounts: policy.AllowBindMounts, AllowNetworks: policy.AllowNetworks}.Validate(compose)
 	if len(remaining) > 0 {
 		fmt.Println("  warning: the deployed compose file uses settings the compose policy rejects, so the")
 		fmt.Println("  agent's next updateLocalStack will fail until they are removed:")
@@ -201,9 +204,40 @@ func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig
 			fmt.Printf("  (%s not allowed automatically: these mounts give control of the host)\n", strings.Join(refused, ", "))
 		}
 		fmt.Println("  If the stack really needs them, set compose_policy in towline.json (allow_bind_mounts,")
-		fmt.Println("  or \"mode\": \"off\") and run 'towline refresh' again.")
+		fmt.Println("  allow_networks, or \"mode\": \"off\") and run 'towline refresh' again.")
 	}
 	return policy
+}
+
+// grandfatherNetworks allows the external networks the deployed stack
+// already joins, for projects whose compose policy predates allow_networks.
+func grandfatherNetworks(api *config.PortainerAPI, pc *config.ProjectConfig) {
+	if pc.StackID == 0 {
+		pc.ComposePolicy.AllowNetworks = []string{}
+		return
+	}
+	compose, err := api.GetStackFile(pc.StackID)
+	if err != nil {
+		fmt.Printf("  warning: could not read the deployed compose file to check its networks: %v\n", err)
+		return // retry on the next refresh
+	}
+	pc.ComposePolicy.AllowNetworks = existingNetworks(compose)
+}
+
+// existingNetworks returns the external networks a compose file joins that
+// may be allowed automatically (never host, none or bridge), as a non-nil
+// list so towline.json records that grandfathering ran.
+func existingNetworks(compose string) []string {
+	allowed := []string{}
+	for _, name := range middleware.ExternalNetworkNames(compose) {
+		if name != "host" && name != "none" && name != "bridge" && !strings.Contains(name, "$") {
+			allowed = appendUnique(allowed, name)
+		}
+	}
+	if len(allowed) > 0 {
+		fmt.Printf("  Compose policy: allowed existing external networks %s\n", strings.Join(allowed, ", "))
+	}
+	return allowed
 }
 
 func isDangerousBind(src string) bool {

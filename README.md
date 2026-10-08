@@ -170,7 +170,7 @@ Each project gets a dedicated Portainer team with its own API key. The team gets
 
 **Layer 2 — MCP stack filtering** (agent experience)
 Docker API responses are filtered to show only this project's containers. Clear error messages if an agent references anything out of scope. On top of that:
-- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged`, `cap_add`, `devices`, host/container `network_mode`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts` or non-local drivers, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), and top-level `include`/`extends`. Named volumes and tmpfs are fine. Specific bind mounts can be allowed per project in `towline.json` (see [Per-project](#per-project-towlinejson)).
+- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged` (including privileged `post_start`/`pre_stop` hooks), `cap_add`, `devices`, non-GPU `deploy.resources.reservations.devices`, `network_mode` other than `bridge`/`none`, host/container `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts`, non-local drivers, `external` or `name`, network `external`/`name` (unless allowed), `driver_opts` or drivers other than `bridge`/`overlay`, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), top-level `include`/`extends`, and files with more than one YAML document. Named volumes and tmpfs are fine. Specific bind mounts and external networks can be allowed per project in `towline.json` (see [Per-project](#per-project-towlinejson)).
 - **Restricted `dockerProxy`**: the only mutations allowed are container lifecycle actions (`start`, `stop`, `restart`, `kill`, `pause`, `unpause`, `wait`, `resize`, `rename`, `update`) and `DELETE /containers/{id}` on the stack's own containers, in the stack's own environment. Container create, exec, archive upload, and anything on networks, volumes, images, or system are rejected, as are paths with query strings, `%`-encoding, `..` segments and similar tricks.
 
 **Layer 3 — Tier-based approval** (deployment control)
@@ -330,10 +330,10 @@ Created by `towline init`. Contains stack metadata and scoped credentials. The g
 `towline.json` can also relax the compose security policy for one project (edited by you, not the agent):
 
 ```json
-"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."] }
+"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."], "allow_networks": ["proxy"] }
 ```
 
-An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `"mode": "off"` disables the policy. The other policy rules still apply when bind mounts are allowed. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-compose-policy off` into the MCP configs.
+An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `allow_networks` lists external networks (e.g. a shared Traefik network) by effective name (`name:` if set, else the key); `host`, `bridge` and `none` are never allowed. `"mode": "off"` disables the policy. The other policy rules still apply. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-allow-networks` / `-compose-policy off` into the MCP configs.
 
 ---
 
@@ -350,7 +350,7 @@ Existing projects keep working without `refresh` (legacy `-token` flag, agent-co
 - makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings
 - fixes permissions (`0600` files, `0700` dirs) and `.gitignore`, and warns if token-bearing files are tracked by git (`git rm --cached`; revoke the token if the repo was pushed)
 - moves the project team to the Standard user role, after checking the team is `team-<stack>` (`--keep-role` skips this)
-- on first run, allows the deployed stack's existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
+- on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`) and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
 
 Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).
 
