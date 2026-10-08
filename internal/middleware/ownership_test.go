@@ -260,6 +260,10 @@ func TestNormalizeDockerPath(t *testing.T) {
 		{in: "/v1.43/containers/abc/json", want: "/containers/abc/json"},
 		{in: "/v1/containers/json", want: "/containers/json"},
 		{in: "/v1.43", want: "/"},
+		// Docker's router accepts any run of digits and dots as a version.
+		{in: "/v1.43./containers/abc/json", want: "/containers/abc/json"},
+		{in: "/v1..43/containers/abc/json", want: "/containers/abc/json"},
+		{in: "/v.1/containers/abc/json", want: "/containers/abc/json"},
 		{in: "/volumes", want: "/volumes"},
 		{in: "containers/json", wantErr: true},
 		{in: "/containers/json?all=1", wantErr: true},
@@ -299,6 +303,18 @@ func TestContainerOwnership_VersionedPathsAreScoped(t *testing.T) {
 		"environmentId": float64(1),
 		"dockerAPIPath": "/v1.43/containers/victim/kill",
 		"method":        "POST",
+	}))
+	require.NoError(t, err)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "does not belong")
+	assert.Equal(t, []string{"/containers/victim/json"}, inspected)
+
+	// A version with a trailing dot is still a version to Docker, so the
+	// path must not slip past as a non-container route.
+	inspected = nil
+	result, err = handler(context.Background(), makeRequest(map[string]any{
+		"environmentId": float64(1),
+		"dockerAPIPath": "/v1.43./containers/victim/json",
+		"method":        "GET",
 	}))
 	require.NoError(t, err)
 	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "does not belong")

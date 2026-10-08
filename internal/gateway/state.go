@@ -136,8 +136,10 @@ type oauthToken struct {
 	// copied, and revokes the whole grant.
 	Successors []string `json:"successors,omitempty"`
 	Used       bool     `json:"used,omitempty"`
-	// GraceUntil is when a rotated token stops being accepted for
-	// retries. It stays stored until ExpiresAt so later reuse is detected.
+	// Parent is the rotated token this one replaced; GraceUntil is when a
+	// used (rotated) token stops being accepted as a retry. A rotated token
+	// is kept until it expires, so presenting it later revokes the grant.
+	Parent     string    `json:"parent,omitempty"`
 	GraceUntil time.Time `json:"grace_until,omitzero"`
 }
 
@@ -170,6 +172,14 @@ type Store struct {
 	mu   sync.Mutex
 	path string
 	now  func() time.Time
+
+	// Token changes are written after the store lock is released (see
+	// unlock), so authentication never waits on disk. gen numbers
+	// snapshots; wmu serializes writes and written skips stale ones.
+	wmu     sync.Mutex
+	dirty   bool
+	gen     uint64
+	written uint64
 
 	conns   map[string]*Connection // by id
 	secrets map[string]string      // secret hash -> connection id
@@ -236,20 +246,62 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-// saveLocked writes the state atomically.
+// saveLocked writes the state now, under the store lock. It is used for
+// connection changes, whose callers need to know the write succeeded.
 func (s *Store) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}
+	data, err := s.snapshotLocked()
+	if err != nil {
+		return err
+	}
+	s.dirty = false
+	s.gen++
+	return s.write(data, s.gen)
+}
+
+// markDirtyLocked records that token state changed; the caller's unlock
+// writes it.
+func (s *Store) markDirtyLocked() {
+	s.dirty = s.path != ""
+}
+
+// unlock releases the store lock, then writes the state if it was marked
+// dirty. Only the snapshot is taken under the lock.
+func (s *Store) unlock() {
+	var data []byte
+	gen := s.gen
+	if s.dirty {
+		s.dirty = false
+		if d, err := s.snapshotLocked(); err == nil {
+			s.gen++
+			data, gen = d, s.gen
+		}
+	}
+	s.mu.Unlock()
+	if data != nil {
+		_ = s.write(data, gen)
+	}
+}
+
+func (s *Store) snapshotLocked() ([]byte, error) {
 	s.pruneLocked()
 	f := stateFile{Version: 1, AccessTokens: s.access, RefreshTokens: s.refresh}
 	for _, c := range s.conns {
 		f.Connections = append(f.Connections, c)
 	}
 	slices.SortFunc(f.Connections, func(a, b *Connection) int { return a.CreatedAt.Compare(b.CreatedAt) })
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
+	return json.Marshal(f)
+}
+
+// write replaces the state file with snapshot gen, unless a newer one has
+// already been written.
+func (s *Store) write(data []byte, gen uint64) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if gen <= s.written {
+		return nil
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -282,6 +334,7 @@ func (s *Store) saveLocked() error {
 		_ = d.Sync()
 		d.Close()
 	}
+	s.written = gen
 	return nil
 }
 
@@ -730,7 +783,9 @@ func (s *Store) issueCode(c *Connection, redirectURI string, redirectGiven bool,
 	s.pruneLocked()
 	n := 0
 	for _, ac := range s.codes {
-		if ac.ConnectionID == c.ID {
+		// Redeemed codes are kept only to detect replay; they don't
+		// count against the client.
+		if ac.ConnectionID == c.ID && !ac.Used {
 			n++
 		}
 	}
@@ -761,14 +816,14 @@ type tokenPair struct {
 func (s *Store) redeemCode(c *Connection, code, redirectURI, verifier, resource string) (*tokenPair, string, error) {
 	h := hashSecret(code)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	ac := s.codes[h]
 	if ac == nil || s.now().After(ac.ExpiresAt) {
 		return nil, "", errors.New("invalid or expired authorization code")
 	}
 	if ac.Used {
 		s.revokeCodeTokensLocked(h)
-		_ = s.saveLocked()
+		s.markDirtyLocked()
 		return nil, "", errors.New("authorization code was already used")
 	}
 	if ac.ConnectionID != c.ID || ac.ClientID != c.ClientID {
@@ -814,7 +869,7 @@ func (s *Store) revokeCodeTokensLocked(codeHash string) {
 func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*tokenPair, string, error) {
 	h := hashSecret(refreshToken)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	t := s.refresh[h]
 	if !strings.HasPrefix(refreshToken, prefixRefreshToken) || t == nil || s.now().After(t.ExpiresAt) || t.ConnectionID != c.ID {
 		return nil, "", errors.New("invalid or expired refresh token")
@@ -822,38 +877,58 @@ func (s *Store) refreshAccess(c *Connection, refreshToken, resource string) (*to
 	if resource != "" && resource != t.Resource {
 		return nil, "", errors.New("resource does not match the grant")
 	}
+	rotate := c.Public()
+	reuse := func() (*tokenPair, string, error) {
+		s.revokeCodeTokensLocked(t.CodeHash)
+		s.markDirtyLocked()
+		return nil, "", errors.New("refresh token was already rotated; the grant is revoked")
+	}
+	now := s.now()
+	if rotate && t.Used && now.After(t.GraceUntil) {
+		return reuse() // rotated and past its retry window: a copy
+	}
 	// A retry within the grace window may have produced several
 	// successors. Once any of them has been used (or is gone), the old
 	// token turning up again means it was copied.
-	if len(t.Successors) > 0 && s.now().After(t.GraceUntil) {
-		s.revokeCodeTokensLocked(t.CodeHash)
-		_ = s.saveLocked()
-		return nil, "", errors.New("refresh token was already rotated; the grant is revoked")
-	}
 	for _, sh := range t.Successors {
 		if succ := s.refresh[sh]; succ == nil || succ.Used {
-			s.revokeCodeTokensLocked(t.CodeHash)
-			_ = s.saveLocked()
-			return nil, "", errors.New("refresh token was already rotated; the grant is revoked")
+			return reuse()
+		}
+	}
+	// The first use of one successor retires its siblings: two holders of
+	// the same token must not each keep a chain. (A retry of this token
+	// finds them retired by its own first use, which is fine.)
+	if rotate && t.Parent != "" && !t.Used {
+		if parent := s.refresh[t.Parent]; parent != nil {
+			for _, sh := range parent.Successors {
+				if sh == h {
+					continue
+				}
+				if sib := s.refresh[sh]; sib != nil {
+					if sib.Used {
+						return reuse()
+					}
+					sib.Used, sib.GraceUntil = true, now
+				}
+			}
+			parent.GraceUntil = now
 		}
 	}
 	t.Used = true
-	// Public clients get a new refresh token each time (OAuth 2.1). The old
-	// one keeps working briefly, so a retried refresh doesn't log the app
-	// out.
-	rotate := c.Public()
-	if rotate {
-		if t.GraceUntil.IsZero() {
-			t.GraceUntil = s.now().Add(refreshGrace)
-		}
+	if rotate && t.GraceUntil.IsZero() {
+		t.GraceUntil = now.Add(refreshGrace)
 	}
 	pair, err := s.issueTokensLocked(c.ID, t.Resource, t.CodeHash, rotate)
 	if err != nil {
 		return nil, "", err
 	}
 	if rotate {
-		t.Successors = append(t.Successors, hashSecret(pair.Refresh))
-		_ = s.saveLocked()
+		nh := hashSecret(pair.Refresh)
+		t.Successors = append(t.Successors, nh)
+		if nt := s.refresh[nh]; nt != nil {
+			nt.Parent = h
+		}
+		s.markDirtyLocked()
 	}
 	return pair, t.Resource, nil
 }
@@ -881,27 +956,29 @@ func (s *Store) issueTokensLocked(connID, resource, codeHash string, withRefresh
 	pair := &tokenPair{Access: prefixAccessToken + randomHex(32)}
 	s.access[hashSecret(pair.Access)] = &oauthToken{ConnectionID: connID, Resource: resource, ExpiresAt: now.Add(accessTokenTTL), CodeHash: codeHash}
 	if withRefresh {
-		r := 0
-		for _, t := range s.refresh {
-			if t.ConnectionID == connID {
-				r++
-			}
-		}
-		if r >= maxTokensPerConnection {
-			var oldest string
+		// Live tokens and rotated ones (kept to detect reuse) are bounded
+		// separately, so issuing tokens never evicts a reuse record first.
+		evict := func(used bool, limit int) {
+			n, oldest := 0, ""
 			for h, t := range s.refresh {
-				if t.ConnectionID == connID && (oldest == "" || t.ExpiresAt.Before(s.refresh[oldest].ExpiresAt)) {
+				if t.ConnectionID != connID || t.Used != used {
+					continue
+				}
+				n++
+				if oldest == "" || t.ExpiresAt.Before(s.refresh[oldest].ExpiresAt) {
 					oldest = h
 				}
 			}
-			delete(s.refresh, oldest)
+			if n >= limit {
+				delete(s.refresh, oldest)
+			}
 		}
+		evict(false, maxTokensPerConnection)
+		evict(true, 4*maxTokensPerConnection)
 		pair.Refresh = prefixRefreshToken + randomHex(32)
 		s.refresh[hashSecret(pair.Refresh)] = &oauthToken{ConnectionID: connID, Resource: resource, ExpiresAt: now.Add(refreshTokenTTL), CodeHash: codeHash}
 	}
-	if err := s.saveLocked(); err != nil {
-		return nil, err
-	}
+	s.markDirtyLocked()
 	return pair, nil
 }
 
@@ -910,14 +987,14 @@ func (s *Store) issueTokensLocked(connID, resource, codeHash string, withRefresh
 func (s *Store) revokeToken(c *Connection, token string) {
 	h := hashSecret(token)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.unlock()
 	if t := s.access[h]; t != nil && t.ConnectionID == c.ID {
 		delete(s.access, h)
 	}
 	if t := s.refresh[h]; t != nil && t.ConnectionID == c.ID {
 		delete(s.refresh, h)
 	}
-	_ = s.saveLocked()
+	s.markDirtyLocked()
 }
 
 func hashSecret(s string) string {

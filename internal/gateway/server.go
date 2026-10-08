@@ -198,14 +198,26 @@ func defaultPort(scheme string) string {
 func (g *Gateway) clientIP(r *http.Request) string {
 	if g.cfg.TrustCloudflare {
 		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))); ip != nil {
-			return ip.String()
+			return ipKey(ip)
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ipKey(ip)
+	}
 	return host
+}
+
+// ipKey identifies a client for rate limiting. An IPv6 client usually
+// holds a whole /64, so addresses in one /64 count as one client.
+func ipKey(ip net.IP) string {
+	if ip.To4() != nil {
+		return ip.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // sameOrigin checks a browser form post came from the gateway's own pages.
@@ -255,7 +267,7 @@ type rateLimiter struct {
 }
 
 type window struct {
-	start time.Time
+	end   time.Time
 	count int
 }
 
@@ -271,15 +283,15 @@ func (l *rateLimiter) allow(key string, limit int, period time.Duration) bool {
 	now := l.now()
 	if now.Sub(l.last) > time.Minute {
 		for k, w := range l.windows {
-			if now.Sub(w.start) > time.Hour {
+			if !now.Before(w.end) {
 				delete(l.windows, k)
 			}
 		}
 		l.last = now
 	}
 	w := l.windows[key]
-	if w == nil || now.Sub(w.start) >= period {
-		w = &window{start: now}
+	if w == nil || !now.Before(w.end) {
+		w = &window{end: now.Add(period)}
 		l.windows[key] = w
 	}
 	w.count++
@@ -291,7 +303,7 @@ func (l *rateLimiter) peek(key string, limit int, period time.Duration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	w := l.windows[key]
-	return w == nil || l.now().Sub(w.start) >= period || w.count < limit
+	return w == nil || !l.now().Before(w.end) || w.count < limit
 }
 
 // Limits.

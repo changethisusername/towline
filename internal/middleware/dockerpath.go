@@ -8,7 +8,7 @@ import (
 
 // dockerVersionPrefix matches an API version prefix such as /v1.43, which
 // Docker accepts in front of every endpoint.
-var dockerVersionPrefix = regexp.MustCompile(`^/v[0-9]+(\.[0-9]+)*(/|$)`)
+var dockerVersionPrefix = regexp.MustCompile(`^/v[0-9.]+(/|$)`)
 
 // NormalizeDockerPath validates a Docker API path supplied by the agent and
 // returns it with any API version prefix removed, so that scoping decisions

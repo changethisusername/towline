@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode"
 
 	"net/http"
 	"net/url"
@@ -234,12 +235,16 @@ func registerError(w http.ResponseWriter, code, desc string) {
 // shown on the consent page as a claim, never trusted.
 func cleanClientName(name string) string {
 	name = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+		// Control and format characters (bidi overrides, zero-width
+		// characters, BOM), line separators, and Hangul fillers, which
+		// render as blank.
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) ||
+			r == 0x115f || r == 0x1160 || r == 0x3164 || r == 0xffa0 {
 			return -1
 		}
 		return r
-	}, strings.TrimSpace(name))
-	if name == "" {
+	}, name)
+	if name = strings.TrimSpace(name); name == "" {
 		return "Unnamed app"
 	}
 	if r := []rune(name); len(r) > 60 {

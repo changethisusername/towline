@@ -180,6 +180,9 @@ func (c *Config) Validate() error {
 	host := strings.ToLower(u.Host)
 	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
 		host = strings.ToLower(u.Hostname())
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]" // IPv6 literal
+		}
 	}
 	c.PublicURL = u.Scheme + "://" + host
 
