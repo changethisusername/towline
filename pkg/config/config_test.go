@@ -1,13 +1,46 @@
 package config
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewPortainerAPI_Timeouts(t *testing.T) {
+	tests := []struct {
+		name   string
+		client func(*PortainerAPI) *http.Client
+		want   time.Duration
+	}{
+		{"api calls", func(p *PortainerAPI) *http.Client { return p.client }, 60 * time.Second},
+		{"stack create and delete", func(p *PortainerAPI) *http.Client { return p.stackClient }, 10 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, skip := range []bool{false, true} {
+				assert.Equal(t, tt.want, tt.client(NewPortainerAPI("https://p", skip)).Timeout)
+			}
+		})
+	}
+}
+
+func TestPortainerAPI_RequestTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer srv.Close()
+	defer close(release)
+
+	api := NewPortainerAPI(srv.URL, false)
+	api.client.Timeout = 50 * time.Millisecond
+	_, err := api.GetTeamName(1)
+	assert.Error(t, err)
+}
 
 func TestSaveAndLoadGlobalConfig(t *testing.T) {
 	tmpDir := t.TempDir()
