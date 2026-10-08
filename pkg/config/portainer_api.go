@@ -9,10 +9,19 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // StandardUserRoleID is Portainer's "Standard user" environment role.
 const StandardUserRoleID = 4
+
+// requestTimeout bounds each Portainer API call so an unresponsive server
+// can't hang the CLI. Creating or deleting a stack runs docker compose (and
+// image pulls) inside the request, so those calls get stackRequestTimeout.
+const (
+	requestTimeout      = 60 * time.Second
+	stackRequestTimeout = 10 * time.Minute
+)
 
 // PortainerAPI is a lightweight HTTP client for Portainer REST API endpoints
 // not available in the upstream SDK. Used by the CLI for setup and provisioning.
@@ -20,6 +29,8 @@ type PortainerAPI struct {
 	BaseURL string
 	Token   string
 	client  *http.Client
+	// stackClient is client with the longer stackRequestTimeout.
+	stackClient *http.Client
 }
 
 // NewPortainerAPI creates a new Portainer API client. TLS certificates are
@@ -31,13 +42,19 @@ func NewPortainerAPI(baseURL string, skipTLSVerify bool) *PortainerAPI {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &PortainerAPI{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Transport: transport},
+		BaseURL:     strings.TrimRight(baseURL, "/"),
+		client:      &http.Client{Transport: transport, Timeout: requestTimeout},
+		stackClient: &http.Client{Transport: transport, Timeout: stackRequestTimeout},
 	}
 }
 
 // doRequest executes an HTTP request against the Portainer API.
 func (p *PortainerAPI) doRequest(method, path string, body []byte) (*http.Response, error) {
+	return p.doRequestWith(p.client, method, path, body)
+}
+
+// doRequestWith executes an HTTP request using the given client.
+func (p *PortainerAPI) doRequestWith(client *http.Client, method, path string, body []byte) (*http.Response, error) {
 	url := p.BaseURL + path
 
 	var reqBody io.Reader
@@ -63,7 +80,7 @@ func (p *PortainerAPI) doRequest(method, path string, body []byte) (*http.Respon
 		}
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		var certErr *tls.CertificateVerificationError
 		if errors.As(err, &certErr) {
@@ -309,7 +326,7 @@ func (p *PortainerAPI) CreateLocalStack(endpointID int, name, composeContent str
 		return 0, fmt.Errorf("failed to marshal stack payload: %w", err)
 	}
 
-	resp, err := p.doRequest("POST",
+	resp, err := p.doRequestWith(p.stackClient, "POST",
 		fmt.Sprintf("/api/stacks/create/standalone/string?endpointId=%d", endpointID),
 		payload)
 	if err != nil {
@@ -366,7 +383,7 @@ func (p *PortainerAPI) DeleteUser(userID int) error {
 
 // DeleteStack deletes a Portainer stack by ID.
 func (p *PortainerAPI) DeleteStack(stackID, endpointID int) error {
-	resp, err := p.doRequest("DELETE",
+	resp, err := p.doRequestWith(p.stackClient, "DELETE",
 		fmt.Sprintf("/api/stacks/%d?endpointId=%d", stackID, endpointID),
 		nil)
 	if err != nil {

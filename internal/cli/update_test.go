@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -838,6 +839,15 @@ func TestDownloadFile_CleansUpOnError(t *testing.T) {
 	err := downloadFile(server.URL, destPath)
 	// This should succeed (empty file is valid)
 	assert.NoError(t, err)
+}
+
+func TestUpdateHTTPClient_Timeouts(t *testing.T) {
+	c := newUpdateHTTPClient()
+	tr, ok := c.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Equal(t, 60*time.Second, tr.ResponseHeaderTimeout, "unresponsive servers fail fast")
+	assert.GreaterOrEqual(t, c.Timeout, 10*time.Minute, "large downloads have time to finish")
+	assert.NotNil(t, tr.Proxy, "proxy settings from the environment are kept")
 }
 
 func TestRunUpdate_InvalidFlag(t *testing.T) {

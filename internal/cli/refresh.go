@@ -41,6 +41,10 @@ func runRefresh(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	names, err := positionalArgs(fs)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.LoadGlobalConfig()
 	if err != nil {
@@ -60,8 +64,8 @@ func runRefresh(args []string) error {
 				dirs = append(dirs, dir)
 			}
 		}
-	case fs.NArg() > 0:
-		for _, name := range fs.Args() {
+	case len(names) > 0:
+		for _, name := range names {
 			if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
 				return fmt.Errorf("invalid project name %q", name)
 			}
@@ -110,13 +114,26 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 
 	// Grandfather the stack's existing bind mounts so it keeps deploying
 	// under the compose policy (only on the first refresh).
-	if pc.ComposePolicy == nil {
-		pc.ComposePolicy = grandfatherComposePolicy(api, pc)
-	} else if pc.ComposePolicy.AllowNetworks == nil {
-		grandfatherNetworks(api, pc)
+	// towline.json is agent-writable. When the project lives in the projects
+	// directory, its stack name must match the directory (as destroy
+	// requires) before its IDs are used against Portainer.
+	anchorErr := checkProjectDirAnchor(cfg, dir, pc)
+	if anchorErr != nil {
+		fmt.Printf("  warning: %v; skipped compose policy grandfathering and team role update\n", anchorErr)
 	}
 
-	if !keepRole {
+	// Grandfathering reads the stack with the project's own token, so it
+	// only ever sees a stack Portainer already lets this project read.
+	if anchorErr == nil {
+		projectAPI := newProjectAPI(cfg, pc.MCPArgs.Token)
+		if pc.ComposePolicy == nil {
+			pc.ComposePolicy = grandfatherComposePolicy(cfg, projectAPI, pc)
+		} else if pc.ComposePolicy.AllowNetworks == nil {
+			grandfatherNetworks(cfg, projectAPI, pc)
+		}
+	}
+
+	if !keepRole && anchorErr == nil {
 		migrateTeamRole(cfg, api, pc)
 	}
 
@@ -166,14 +183,17 @@ func refreshProject(cfg *config.GlobalConfig, api *config.PortainerAPI, dir stri
 // grandfatherComposePolicy allows the bind mounts the deployed stack already
 // uses, except ones that would hand over the host, and reports anything
 // else the compose policy would reject on the next update.
-func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig) *config.ComposePolicyConfig {
+//
+// towline.json is agent-writable, so api should carry the project's own
+// token, and the stack must carry the project's stack name on the
+// configured environment.
+func grandfatherComposePolicy(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) *config.ComposePolicyConfig {
 	policy := &config.ComposePolicyConfig{Mode: "enforce", AllowNetworks: []string{}}
 	if pc.StackID == 0 {
 		return policy
 	}
-	compose, err := api.GetStackFile(pc.StackID)
-	if err != nil {
-		fmt.Printf("  warning: could not read the deployed compose file to check the compose policy: %v\n", err)
+	stackName, compose, ok := readProjectStack(cfg, api, pc)
+	if !ok {
 		return nil // retry on the next refresh
 	}
 
@@ -189,7 +209,10 @@ func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig
 		}
 	}
 	if len(policy.AllowBindMounts) > 0 {
-		fmt.Printf("  Compose policy: allowed existing bind mounts %s\n", strings.Join(policy.AllowBindMounts, ", "))
+		fmt.Printf("  Compose policy: allowing the bind mounts stack %q already uses:\n", stackName)
+		for _, m := range policy.AllowBindMounts {
+			fmt.Println("    - " + m)
+		}
 	}
 	policy.AllowNetworks = existingNetworks(compose)
 
@@ -211,17 +234,39 @@ func grandfatherComposePolicy(api *config.PortainerAPI, pc *config.ProjectConfig
 
 // grandfatherNetworks allows the external networks the deployed stack
 // already joins, for projects whose compose policy predates allow_networks.
-func grandfatherNetworks(api *config.PortainerAPI, pc *config.ProjectConfig) {
+func grandfatherNetworks(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) {
 	if pc.StackID == 0 {
 		pc.ComposePolicy.AllowNetworks = []string{}
 		return
 	}
-	compose, err := api.GetStackFile(pc.StackID)
-	if err != nil {
-		fmt.Printf("  warning: could not read the deployed compose file to check its networks: %v\n", err)
+	_, compose, ok := readProjectStack(cfg, api, pc)
+	if !ok {
 		return // retry on the next refresh
 	}
 	pc.ComposePolicy.AllowNetworks = existingNetworks(compose)
+}
+
+// readProjectStack reads the deployed compose file for grandfathering. The
+// IDs come from agent-writable towline.json, so api should carry the
+// project's own token, and the stack must carry the project's stack name on
+// the configured environment.
+func readProjectStack(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *config.ProjectConfig) (name, compose string, ok bool) {
+	stack, err := api.GetStack(pc.StackID)
+	if err != nil {
+		fmt.Printf("  warning: could not look up stack %d to check the compose policy: %v\n", pc.StackID, err)
+		return "", "", false
+	}
+	if stack.Name != pc.StackName || stack.EndpointID != cfg.PortainerEnvID {
+		fmt.Printf("  warning: skipped compose policy check: stack %d is %q on environment %d, expected %q on environment %d\n",
+			pc.StackID, stack.Name, stack.EndpointID, pc.StackName, cfg.PortainerEnvID)
+		return "", "", false
+	}
+	compose, err = api.GetStackFile(stack.ID)
+	if err != nil {
+		fmt.Printf("  warning: could not read the deployed compose file to check the compose policy: %v\n", err)
+		return "", "", false
+	}
+	return stack.Name, compose, true
 }
 
 // existingNetworks returns the external networks a compose file joins that
@@ -238,6 +283,32 @@ func existingNetworks(compose string) []string {
 		fmt.Printf("  Compose policy: allowed existing external networks %s\n", strings.Join(allowed, ", "))
 	}
 	return allowed
+}
+
+// checkProjectDirAnchor requires, for a project directory directly inside
+// the projects directory, that towline.json's stack name is
+// <directory name>-dev or -prod. Projects elsewhere (existing codebases)
+// have no such anchor and are not checked here.
+func checkProjectDirAnchor(cfg *config.GlobalConfig, dir string, pc *config.ProjectConfig) error {
+	if cfg.ProjectsDir == "" || filepath.Dir(resolvePath(dir)) != resolvePath(cfg.ProjectsDir) {
+		return nil
+	}
+	name := filepath.Base(resolvePath(dir))
+	if pc.StackName != name+"-dev" && pc.StackName != name+"-prod" {
+		return fmt.Errorf("towline.json stack_name %q does not belong to project %q", pc.StackName, name)
+	}
+	return nil
+}
+
+// resolvePath returns an absolute, symlink-free form of p where possible.
+func resolvePath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	return filepath.Clean(p)
 }
 
 func isDangerousBind(src string) bool {
@@ -268,17 +339,19 @@ func migrateTeamRole(cfg *config.GlobalConfig, api *config.PortainerAPI, pc *con
 	if pc.TeamID == 0 {
 		return
 	}
+	// towline.json is agent-writable: only touch the environment towline is
+	// configured for, and only a team carrying this project's name.
+	if pc.EnvID != 0 && pc.EnvID != cfg.PortainerEnvID {
+		fmt.Printf("  warning: skipped team role update (towline.json environment %d is not the configured environment %d)\n", pc.EnvID, cfg.PortainerEnvID)
+		return
+	}
 	want := "team-" + pc.StackName
 	name, err := api.GetTeamName(pc.TeamID)
 	if err != nil || name != want {
 		fmt.Printf("  warning: skipped team role update (team %d is %q, expected %q)\n", pc.TeamID, name, want)
 		return
 	}
-	envID := pc.EnvID
-	if envID == 0 {
-		envID = cfg.PortainerEnvID
-	}
-	if err := api.SetEndpointTeamAccess(envID, pc.TeamID); err != nil {
+	if err := api.SetEndpointTeamAccess(cfg.PortainerEnvID, pc.TeamID); err != nil {
 		fmt.Printf("  warning: could not update team role: %v\n", err)
 		return
 	}
@@ -304,9 +377,8 @@ func mergeMCPServer(file, tmpl, serverName string, data TemplateData) error {
 	existing := map[string]any{}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &existing); err != nil {
-			// Keep the unparsable file for the user and start fresh.
-			_ = os.WriteFile(file+".bak", raw, secretFileMode)
-			existing = map[string]any{}
+			// Don't drop the user's other servers: let them fix the file.
+			return fmt.Errorf("%s is not valid JSON (fix or remove it and retry): %w", file, err)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -335,8 +407,9 @@ func carryOver(old, entry map[string]any) {
 	newArgs, _ := entry["args"].([]any)
 	for i := 0; i < len(oldArgs); i++ {
 		arg, _ := oldArgs[i].(string)
-		if generatedFlags[arg] {
-			if valueFlags[arg] {
+		if name, inline := normalizeFlag(arg); generatedFlags[name] {
+			// -flag=value carries its value; -flag value takes the next arg.
+			if valueFlags[name] && !inline {
 				i++
 			}
 			continue
@@ -359,6 +432,20 @@ func carryOver(old, entry map[string]any) {
 			newEnv[k] = v
 		}
 	}
+}
+
+// normalizeFlag returns a Go-style flag argument as "-name" (accepting
+// -name, --name and either with =value) and whether it carries its value.
+// Non-flag arguments are returned unchanged.
+func normalizeFlag(arg string) (name string, inlineValue bool) {
+	if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+		return arg, false
+	}
+	name = "-" + strings.TrimLeft(arg, "-")
+	if i := strings.Index(name, "="); i >= 0 {
+		return name[:i], true
+	}
+	return name, false
 }
 
 // ensureClaudePermission makes sure .claude/settings.json allows the towline
@@ -396,11 +483,7 @@ func ensureClaudePermission(file, permission string) error {
 // warnTrackedSecrets warns if files holding the project token are
 // committed to git: .gitignore does not untrack them.
 func warnTrackedSecrets(dir string) {
-	out, err := exec.Command("git", "-C", dir, "ls-files", "--", ".mcp.json", "towline.json", ".claude", ".cursor", ".gemini").Output()
-	if err != nil {
-		return
-	}
-	tracked := strings.Fields(string(out))
+	tracked := trackedSecrets(dir)
 	if len(tracked) == 0 {
 		return
 	}
@@ -410,4 +493,14 @@ func warnTrackedSecrets(dir string) {
 	}
 	fmt.Println("  Untrack them with 'git rm --cached <file>'. If the repository was ever pushed, treat the")
 	fmt.Println("  token as leaked: revoke it in Portainer (Users > towline-" + filepath.Base(dir) + "-* > Access tokens).")
+}
+
+// trackedSecrets lists the token-bearing files in dir that git tracks. It
+// returns nil when dir is not a git work tree or git is unavailable.
+func trackedSecrets(dir string) []string {
+	out, err := exec.Command("git", "-C", dir, "ls-files", "--", ".mcp.json", "towline.json", ".claude", ".cursor", ".gemini").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
 }

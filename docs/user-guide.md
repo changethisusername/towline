@@ -29,16 +29,13 @@ This guide covers day-to-day usage of Towline — how to work with your agent to
 towline init my-app
 
 # Dev project with web-app template (app + Postgres + Redis)
-towline init my-app --template web-app
-
-# Project with both dev and prod tiers
-towline init my-app --with-prod
+towline init --template web-app my-app
 
 # Direct prod project
-towline init my-app --tier prod
+towline init --tier prod my-app
 
 # Template pack (compose + skills)
-towline init my-app --template ai-stack
+towline init --template ai-stack my-app
 ```
 
 Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, `-` and `_`, starting with a letter or digit).
@@ -63,7 +60,7 @@ Shows all Towline-managed projects with their stack name, tier, and status.
 
 ```bash
 towline destroy my-app           # interactive confirmation
-towline destroy my-app --confirm # skip confirmation
+towline destroy --confirm my-app # skip confirmation
 ```
 
 This removes the Portainer stack, service user, and team. Because `towline.json` lives in the project directory (which the agent can write), each ID in it is verified against Portainer before deletion: the stack must be named `<project>-<tier>`, the user `towline-<stack>`, and the team `team-<stack>`. Mismatches are skipped with a message. Local files are preserved — delete them manually if needed. Projects created before name validation existed can still be destroyed; only names containing `/`, `\`, or equal to `.`/`..` are rejected.
@@ -361,13 +358,13 @@ The diff between deployments often points directly at the problem.
 
 ### Setting up prod
 
-Create a project with both tiers:
+Create a prod-tier project (stack `my-app-prod`):
 
 ```bash
-towline init my-app --with-prod
+towline init --tier prod my-app
 ```
 
-Or promote an existing dev project later (coming in Phase 3):
+Each project has a single tier. Promoting an existing dev project to prod is coming in Phase 3:
 
 ```bash
 towline promote my-app  # not yet implemented
@@ -530,7 +527,7 @@ volumes:
   minio_data:
 ```
 
-Use it: `towline init my-ml-project --template ml-pipeline`
+Use it: `towline init --template ml-pipeline my-ml-project`
 
 ### Creating template packs
 
@@ -573,7 +570,7 @@ Add your compose file and skill files in the same directory:
 └── my-custom-ops.md
 ```
 
-Use it: `towline init my-project --template my-pack`
+Use it: `towline init --template my-pack my-project`
 
 The pack's skills are copied alongside the base DevOps skill. The pack's MCP configs are merged into the generated MCP config files (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`). Pack MCP servers start automatically with your privileges whenever the agent starts, so only use servers from verified publishers, pinned to an exact version.
 
@@ -714,7 +711,8 @@ approval:
 |------|---------|-------------|
 | `--tier` | `dev` | Deployment tier: `dev` or `prod` |
 | `--template` | `default` | Compose template or pack name |
-| `--with-prod` | `false` | Also create a prod stack |
+
+Flags go before the project name (`towline init --tier prod my-app`); flags after it are rejected.
 
 ### towline destroy flags
 

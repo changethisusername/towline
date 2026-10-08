@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 )
 
@@ -8,6 +10,14 @@ import (
 var Version string
 
 func Run(args []string) error {
+	// -h/--help on a command prints its usage; that is not a failure.
+	if err := run(args); err != nil && !errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+	return nil
+}
+
+func run(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: towline <command> [args]\nCommands: setup, init, list, destroy, promote, rotate-keys, status, update, approvals, refresh")
 	}

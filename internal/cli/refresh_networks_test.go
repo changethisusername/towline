@@ -54,6 +54,7 @@ func TestRefresh_GrandfathersExternalNetworks(t *testing.T) {
 			f := newFakePortainer()
 			f.teams[7] = "team-shop-prod"
 			f.stackFiles = map[int]string{11: networksCompose}
+			f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
 			srv := httptest.NewServer(f.handler(t))
 			defer srv.Close()
 
