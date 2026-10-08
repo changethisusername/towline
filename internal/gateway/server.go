@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -308,6 +309,9 @@ func Main(args []string) error {
 	fs := newFlagSet()
 	configPath := fs.String("config", "", "Path to the gateway config (default: the "+ConfigEnvVar+" environment variable)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	cfg, err := LoadConfig(*configPath)

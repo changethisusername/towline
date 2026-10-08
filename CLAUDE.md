@@ -51,11 +51,14 @@ make fmt            # gofmt
 
 **Approval server** (`towline approvals serve`, `internal/approval/server.go`): ships with the CLI. Implements the webhook contract for towline-mcp, plus a web UI (`/ui`) and approver API for humans, authenticated by an approver token whose SHA-256 is stored in `~/.towline/config.yaml`. The webhook token given to towline-mcp can submit and poll, never decide. Optional ntfy notifications (action, project and short id only; tool arguments stay on the server). Pending requests are capped at 100.
 
+**Remote gateway** (`towline-mcp gateway`, `internal/gateway`): serves projects over streamable HTTP to remote MCP clients (Claude/ChatGPT connectors, Claude Code), deployed by `towline remote setup|deploy` as a `towline-gateway` Portainer stack with a `cloudflared` sidecar (works behind NAT). Each project is built by `internal/towlinemcp` exactly like the stdio server (same middleware chain, its own team-scoped token), plus `middleware.NewCallerGate` (read/deploy scope, fails closed without a caller). Owner-issued connections (owner web page `/ui`, owner token) grant read or deploy on one or more projects as a header token (`twl_ct_`), a pre-registered confidential OAuth client, or a dynamically registered app approved by the owner during a 10-minute pairing window. Projects and scope are re-read from the connection on every request; OAuth access tokens are bound to one endpoint (`/mcp` with `<project>__<tool>` names, or `/p/<project>/mcp`). Changes need the owner's approval on `/ui` on every tier by default (`approval: always`); agent self-confirmation is never used remotely, and approval tokens are bound to the calling connection. State (connections, hashed secrets, OAuth grants) is in `/data/state.json`. The gateway never holds the admin key. See `docs/remote-gateway.md`.
+
 **towline CLI** (scaffolding tool):
 - `towline init <project>` creates: Portainer team + scoped API key + stack + `.claude/settings.json` + CLAUDE.md + compose files + git init
 - Global config lives in `~/.towline/config.yaml` (portainer_url, admin key, env ID, projects dir, `skip_tls_verify`, `approval:` block)
 - `towline refresh [--all|name...]` upgrades existing projects in place: merges the towline entry into MCP configs (keeping other servers and user flags), fixes permissions/.gitignore, moves teams to the Standard user role, and grandfathers deployed bind mounts into `towline.json` `compose_policy`
 - `towline approvals setup|serve|list|show|approve|reject` configures and runs prod approvals
+- `towline remote setup|deploy|add|remove|status|owner-token` configures and deploys the remote gateway (`~/.towline/remote.yaml`, 0600); its config is rebuilt from each project's `towline.json` on every deploy, re-checking the directory anchor and that the tier matches the stack name
 - Templates in `~/.towline/templates/` are interpolated with `{{PROJECT_NAME}}`, `{{STACK_NAME}}`, `{{TIER}}`
 
 ### Three-layer permissions model
