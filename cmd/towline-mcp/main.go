@@ -11,6 +11,7 @@ import (
 	"github.com/changethisusername/towline/internal/proxy"
 	"github.com/changethisusername/towline/internal/tooldef"
 	"github.com/changethisusername/towline/internal/towline"
+	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
@@ -82,7 +83,7 @@ func main() {
 		log.Fatal().Err(err).Msg("invalid -approval-mode")
 	}
 
-	var composePolicy middleware.ComposePolicy
+	composePolicy := middleware.ComposePolicy{StackName: *stackFlag}
 	switch *composePolicyFlag {
 	case "enforce":
 	case "off":

@@ -55,6 +55,11 @@ type ComposePolicy struct {
 	// set, else the key) that stacks may join, e.g. a shared proxy network.
 	// host, none and bridge are never allowed.
 	AllowNetworks []string
+	// StackName is the stack being deployed. Network aliases and container
+	// names under ".towline" are reserved for routing: a service may only
+	// use its own "<service>.<stack>.towline", so one project cannot answer
+	// for another project's routed service on a shared proxy network.
+	StackName string
 }
 
 // reservedNetworkNames are Docker's built-in networks; joining them as an
@@ -251,6 +256,12 @@ func (p ComposePolicy) validateService(name string, svc map[string]any) []string
 		}
 	}
 
+	for _, n := range dnsNames(svc) {
+		if strings.HasSuffix(strings.ToLower(n), ".towline") && (p.StackName == "" || n != name+"."+p.StackName+".towline") {
+			add("name %q is reserved: only %q may be used under .towline", n, name+"."+p.StackName+".towline")
+		}
+	}
+
 	if val, ok := svc["network_mode"]; ok {
 		if s, isString := val.(string); !isString || !allowedNetworkModes[s] {
 			add("network_mode %q is not allowed", fmt.Sprint(val))
@@ -333,6 +344,26 @@ func (p ComposePolicy) validateService(name string, svc map[string]any) []string
 // checkDeviceReservations rejects deploy.resources.reservations.devices
 // entries other than GPU reservations: like "devices", other drivers (e.g.
 // CDI) and options can give the container host devices.
+// dnsNames returns the names other containers can resolve a service by
+// beyond its service name: container_name and network aliases.
+func dnsNames(svc map[string]any) []string {
+	var names []string
+	if cn, ok := svc["container_name"].(string); ok {
+		names = append(names, cn)
+	}
+	nets, _ := svc["networks"].(map[string]any)
+	for _, raw := range nets {
+		net, _ := raw.(map[string]any)
+		aliases, _ := net["aliases"].([]any)
+		for _, a := range aliases {
+			if s, ok := a.(string); ok {
+				names = append(names, s)
+			}
+		}
+	}
+	return names
+}
+
 func checkDeviceReservations(deploy any) []string {
 	d, _ := deploy.(map[string]any)
 	resources, _ := d["resources"].(map[string]any)

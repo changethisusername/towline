@@ -263,3 +263,29 @@ func TestExternalNetworkNames(t *testing.T) {
 	assert.Equal(t, []string{"shared", "b"}, ExternalNetworkNames(compose))
 	assert.Nil(t, ExternalNetworkNames("networks: ["))
 }
+
+func TestComposePolicy_ReservedTowlineNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		compose string
+		wantErr bool
+	}{
+		{name: "own alias allowed", compose: "services:\n  web:\n    image: x\n    networks:\n      default:\n        aliases: [web.shop.towline]\n"},
+		{name: "other aliases allowed", compose: "services:\n  web:\n    image: x\n    networks:\n      default:\n        aliases: [api]\n"},
+		{name: "another stack's alias", compose: "services:\n  web:\n    image: x\n    networks:\n      default:\n        aliases: [web.victim.towline]\n", wantErr: true},
+		{name: "another service's alias", compose: "services:\n  worker:\n    image: x\n    networks:\n      default:\n        aliases: [web.shop.towline]\n", wantErr: true},
+		{name: "case variant", compose: "services:\n  web:\n    image: x\n    networks:\n      default:\n        aliases: [WEB.victim.TOWLINE]\n", wantErr: true},
+		{name: "container_name", compose: "services:\n  web:\n    image: x\n    container_name: web.victim.towline\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := ComposePolicy{StackName: "shop"}.Validate(tt.compose)
+			if tt.wantErr {
+				require.NotEmpty(t, v)
+				assert.Contains(t, strings.Join(v, "\n"), "reserved")
+			} else {
+				assert.Empty(t, v)
+			}
+		})
+	}
+}
