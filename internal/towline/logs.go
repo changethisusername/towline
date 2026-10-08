@@ -3,8 +3,10 @@ package towline
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -12,17 +14,30 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+// isDockerFrameHeader reports whether b starts with a multiplexed stream
+// header: stream type 0 (stdin), 1 (stdout) or 2 (stderr), then three zero
+// bytes. Log text never starts that way, so this distinguishes framed
+// output from a TTY container's raw stream.
+func isDockerFrameHeader(b []byte) bool {
+	return len(b) >= 8 && b[0] <= 2 && b[1] == 0 && b[2] == 0 && b[3] == 0
+}
+
 // stripDockerLogHeaders removes the 8-byte multiplexed stream header that Docker
 // prepends to each log line when using the Docker API (not TTY mode).
 // Each frame has: [stream_type(1 byte)][0 0 0][size(4 bytes BE)][payload]
+// Containers with a TTY send raw output without headers; that is returned
+// unchanged, as is anything after a point where framing stops being valid.
 func stripDockerLogHeaders(data []byte) string {
+	if !isDockerFrameHeader(data) {
+		return string(data)
+	}
+
 	var result strings.Builder
 	pos := 0
 
 	for pos < len(data) {
-		// Need at least 8 bytes for the header
-		if pos+8 > len(data) {
-			// Remaining bytes don't form a complete header; append as-is
+		if !isDockerFrameHeader(data[pos:]) {
+			// Not a (complete) header; keep the remaining bytes as-is
 			result.Write(data[pos:])
 			break
 		}
@@ -66,7 +81,11 @@ func (h *Handlers) HandleServiceLogs() server.ToolHandlerFunc {
 			tail = 200
 		}
 
-		since, err := parser.GetString("since", false)
+		sinceArg, err := parser.GetString("since", false)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("invalid since parameter", err), nil
+		}
+		since, err := parseLogsSince(sinceArg, time.Now())
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("invalid since parameter", err), nil
 		}
@@ -120,6 +139,37 @@ func (h *Handlers) HandleServiceLogs() server.ToolHandlerFunc {
 
 		return mcp.NewToolResultText(allLogs.String()), nil
 	}
+}
+
+// unixTimestampPattern matches what the Docker logs API accepts directly
+// for since: unix seconds, optionally with a fractional part.
+var unixTimestampPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,9})?$`)
+
+// parseLogsSince converts the since argument into the unix timestamp the
+// Docker logs API expects. It accepts an RFC3339 timestamp, a Go duration
+// meaning "this long ago" (e.g. "10m", "1h30m"), or unix seconds, which
+// are passed through. An empty value returns "".
+func parseLogsSince(since string, now time.Time) (string, error) {
+	since = strings.TrimSpace(since)
+	if since == "" {
+		return "", nil
+	}
+	if unixTimestampPattern.MatchString(since) {
+		return since, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, since); err == nil {
+		if t.Unix() < 0 {
+			return "", fmt.Errorf("since %q is before 1970", since)
+		}
+		return strconv.FormatInt(t.Unix(), 10), nil
+	}
+	if d, err := time.ParseDuration(since); err == nil {
+		if d <= 0 {
+			return "", fmt.Errorf("since duration %q must be positive", since)
+		}
+		return strconv.FormatInt(now.Add(-d).Unix(), 10), nil
+	}
+	return "", fmt.Errorf("since %q must be an RFC3339 timestamp (2026-01-02T15:04:05Z), a duration such as 10m or 2h, or unix seconds", since)
 }
 
 // filterLines returns only lines containing the filter substring.

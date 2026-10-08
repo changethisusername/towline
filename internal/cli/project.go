@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,15 @@ func newAdminAPI(cfg *config.GlobalConfig) *config.PortainerAPI {
 	}
 	api := config.NewPortainerAPI(cfg.PortainerURL, skip)
 	api.Token = cfg.PortainerAPIKey
+	return api
+}
+
+// newProjectAPI returns a Portainer client authenticated with a project's
+// own (team-scoped) API token rather than the admin key.
+func newProjectAPI(cfg *config.GlobalConfig, token string) *config.PortainerAPI {
+	skip, _ := cfg.InsecureTLS()
+	api := config.NewPortainerAPI(cfg.PortainerURL, skip)
+	api.Token = token
 	return api
 }
 
@@ -45,6 +55,8 @@ func projectTemplateData(cfg *config.GlobalConfig, projectName string, pc *confi
 	if cp := pc.ComposePolicy; cp != nil {
 		data.ComposePolicyOff = cp.Mode == "off"
 		data.AllowBindMounts = strings.Join(cp.AllowBindMounts, ",")
+		data.AllowNetworks = strings.Join(cp.AllowNetworks, ",")
+		data.AllowVolumes = strings.Join(cp.AllowVolumes, ",")
 	}
 	return data
 }
@@ -63,4 +75,16 @@ func resolveMCPBinary() string {
 // projectNameFromStack derives the project name from a <project>-<tier> stack name.
 func projectNameFromStack(stackName, tier string) string {
 	return strings.TrimSuffix(stackName, "-"+tier)
+}
+
+// positionalArgs returns the arguments left after fs.Parse. The flag package
+// stops at the first non-flag argument, so a flag placed after the project
+// name would otherwise be ignored without a word.
+func positionalArgs(fs *flag.FlagSet) ([]string, error) {
+	for _, a := range fs.Args() {
+		if strings.HasPrefix(a, "-") && a != "-" {
+			return nil, fmt.Errorf("flags must come before the project name (%q was given after it)", a)
+		}
+	}
+	return fs.Args(), nil
 }

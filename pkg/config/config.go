@@ -93,6 +93,14 @@ type ComposePolicyConfig struct {
 	// AllowBindMounts lists host paths stacks may bind mount; "." allows
 	// relative paths inside the stack directory.
 	AllowBindMounts []string `json:"allow_bind_mounts,omitempty"`
+	// AllowNetworks lists external networks (by effective name) stacks may
+	// join. It is not omitted when empty: an empty list records that
+	// refresh has already grandfathered the stack's existing networks.
+	AllowNetworks []string `json:"allow_networks"`
+	// AllowVolumes lists external or named volumes (by effective name)
+	// stacks may mount. Like AllowNetworks, an empty list records that
+	// refresh has grandfathered the stack's existing volumes.
+	AllowVolumes []string `json:"allow_volumes"`
 }
 
 // MCPArgs holds the arguments passed to the towline-mcp binary.

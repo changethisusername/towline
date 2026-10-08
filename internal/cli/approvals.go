@@ -14,6 +14,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/changethisusername/towline/internal/approval"
 	"github.com/changethisusername/towline/pkg/config"
@@ -23,15 +24,27 @@ const defaultApprovalListen = "127.0.0.1:8787"
 
 func runApprovals(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: towline approvals <setup|serve|list|approve|reject>")
+		return fmt.Errorf("usage: towline approvals <setup|serve|list|show|approve|reject>")
 	}
 	switch args[0] {
+	case "-h", "-help", "--help", "help":
+		fmt.Println("Usage: towline approvals <setup|serve|list|show|approve|reject>")
+		fmt.Println()
+		fmt.Println("  setup           Choose human or agent approval for prod operations")
+		fmt.Println("  serve           Run the built-in approval server")
+		fmt.Println("  list            List approval requests")
+		fmt.Println("  show <id>       Show what a request would do")
+		fmt.Println("  approve <id>    Approve a pending request")
+		fmt.Println("  reject <id>     Reject a pending request")
+		return nil
 	case "setup":
 		return runApprovalsSetup(args[1:])
 	case "serve":
 		return runApprovalsServe(args[1:])
 	case "list":
 		return runApprovalsList(args[1:])
+	case "show":
+		return runApprovalsShow(args[1:])
 	case "approve":
 		return runApprovalsDecide(args[1:], "approve")
 	case "reject":
@@ -110,7 +123,7 @@ func runApprovalsSetup(args []string) error {
 	mode := fs.String("mode", "", "human (approval server) or agent (the agent confirms its own prod operations)")
 	listen := fs.String("listen", defaultApprovalListen, "Listen address for the built-in approval server")
 	external := fs.String("url", "", "Use an external approval server at this URL instead of the built-in one")
-	webhookToken := fs.String("webhook-token", "", "Bearer token towline-mcp sends to the approval server (generated if empty)")
+	webhookToken := fs.String("webhook-token", "", "Bearer token towline-mcp sends to the approval server (generated for the built-in server if empty; with --url, use the token your server expects)")
 	ntfy := fs.String("ntfy", "", "ntfy topic URL for push notifications, e.g. https://ntfy.sh/<private-topic>")
 	publicURL := fs.String("public-url", "", "URL where you open the approval UI (used in notification links)")
 	if err := fs.Parse(args); err != nil {
@@ -120,6 +133,16 @@ func runApprovalsSetup(args []string) error {
 	cfg, err := config.LoadGlobalConfig()
 	if err != nil {
 		return err
+	}
+
+	// Keep notification settings from an earlier setup unless given again.
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["ntfy"] {
+		*ntfy = cfg.Approval.NtfyURL
+	}
+	if !set["public-url"] {
+		*publicURL = cfg.Approval.PublicURL
 	}
 
 	m := *mode
@@ -309,9 +332,68 @@ func runApprovalsList(args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tSTATUS\tPROJECT\tACTION\tREQUESTED")
 	for _, r := range records {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.ID, r.Status, r.Project, r.Action, r.CreatedAt.Local().Format(time.DateTime))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", terminalSafe(r.ID), r.Status, terminalSafe(r.Project), terminalSafe(r.Action), r.CreatedAt.Local().Format(time.DateTime))
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("See what a request would do with 'towline approvals show <id>' before approving it.")
+	return nil
+}
+
+func runApprovalsShow(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: towline approvals show <id>")
+	}
+	c, err := newApproverClient()
+	if err != nil {
+		return err
+	}
+	var records []approval.Record
+	if err := c.do("GET", "/api/requests", &records); err != nil {
+		return err
+	}
+	for _, r := range records {
+		if r.ID != args[0] {
+			continue
+		}
+		fmt.Printf("ID:        %s\n", terminalSafe(r.ID))
+		fmt.Printf("Status:    %s\n", r.Status)
+		fmt.Printf("Project:   %s\n", terminalSafe(r.Project))
+		fmt.Printf("Action:    %s\n", terminalSafe(r.Action))
+		fmt.Printf("Requested: %s\n", r.CreatedAt.Local().Format(time.DateTime))
+		if r.Description != "" {
+			fmt.Printf("\nArguments:\n%s\n", terminalSafeBlock(r.Description))
+		}
+		if r.StackContent != "" {
+			fmt.Printf("\nCompose file:\n%s\n", terminalSafeBlock(r.StackContent))
+		}
+		return nil
+	}
+	return fmt.Errorf("no approval request with id %q", args[0])
+}
+
+// terminalSafe replaces control characters in agent-supplied text so it
+// cannot move the cursor or rewrite what the approver sees in the terminal.
+func terminalSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// terminalSafeBlock is terminalSafe for multi-line text: it keeps newlines
+// and tabs.
+func terminalSafeBlock(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 func runApprovalsDecide(args []string, decision string) error {

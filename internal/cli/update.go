@@ -19,9 +19,16 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-// httpClient is the HTTP client used for all update requests.
-// It has a 60-second timeout to prevent hanging on slow/unresponsive servers.
-var httpClient = &http.Client{Timeout: 60 * time.Second}
+// httpClient is the HTTP client used for all update requests. A server that
+// doesn't start responding within 60 seconds fails fast; the overall limit is
+// long enough to download release archives over a slow connection.
+var httpClient = newUpdateHTTPClient()
+
+func newUpdateHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: transport, Timeout: 10 * time.Minute}
+}
 
 // maxAPIResponseBytes limits JSON API response bodies to 10MB.
 const maxAPIResponseBytes = 10 * 1024 * 1024

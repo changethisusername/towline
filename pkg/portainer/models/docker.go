@@ -1,6 +1,9 @@
 package models
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // DockerProxyRequestOptions represents the options for a Docker API request to a specific Portainer environment.
 type DockerProxyRequestOptions struct {
@@ -16,4 +19,6 @@ type DockerProxyRequestOptions struct {
 	Headers map[string]string
 	// Body is the request body to send (set it to nil for requests that don't have a body).
 	Body io.Reader
+	// Context, if set, bounds the request (cancellation and deadline).
+	Context context.Context
 }

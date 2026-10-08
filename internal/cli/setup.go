@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -13,6 +15,21 @@ import (
 )
 
 func runSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: towline setup")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Interactively connect towline to a Portainer instance: asks for the URL, admin")
+		fmt.Fprintln(fs.Output(), "credentials, environment, projects directory and prod approval mode, and saves")
+		fmt.Fprintln(fs.Output(), "them to ~/.towline/config.yaml.")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: towline setup (it takes no arguments)")
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("=== Towline Setup ===")
@@ -154,9 +171,9 @@ func runSetup(args []string) error {
 		projectsDir = defaultProjectsDir
 	}
 
-	// Expand ~ in path
-	if strings.HasPrefix(projectsDir, "~/") {
-		projectsDir = home + projectsDir[1:]
+	projectsDir, err = absProjectsDir(projectsDir, home)
+	if err != nil {
+		return err
 	}
 
 	// Save configuration
@@ -207,6 +224,21 @@ func runSetup(args []string) error {
 	fmt.Println("Next step: run 'towline init <project-name>' to create a project.")
 
 	return nil
+}
+
+// absProjectsDir expands a leading ~ and makes the projects directory
+// absolute, so the saved path doesn't depend on where setup was run.
+func absProjectsDir(dir, home string) (string, error) {
+	if dir == "~" {
+		dir = home
+	} else if strings.HasPrefix(dir, "~/") {
+		dir = filepath.Join(home, dir[2:])
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve projects directory: %w", err)
+	}
+	return abs, nil
 }
 
 // decodeUserIDFromJWT extracts the user ID from a Portainer JWT token.

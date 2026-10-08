@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -179,9 +180,15 @@ func TestServer_UIFlow(t *testing.T) {
 }
 
 func TestServer_Ntfy(t *testing.T) {
-	got := make(chan *http.Request, 1)
+	type notification struct {
+		header http.Header
+		body   string
+	}
+	got := make(chan notification, 1)
 	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got <- r
+		// Read the body here: it is closed once the handler returns.
+		body, _ := io.ReadAll(r.Body)
+		got <- notification{r.Header, string(body)}
 	}))
 	defer ntfy.Close()
 
@@ -190,15 +197,52 @@ func TestServer_Ntfy(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := do(t, "POST", ts.URL+"/", testWebhookToken, `{"id":"n1","project":"app-prod","action":"towline_exec"}`)
+	resp := do(t, "POST", ts.URL+"/", testWebhookToken, `{"id":"n1","project":"app-prod","action":"towline_env_set","description":"{\"value\":\"hunter2\"}"}`)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	select {
 	case r := <-got:
-		assert.Contains(t, r.Header.Get("Title"), "app-prod")
-		assert.Equal(t, "https://approve.example/ui", r.Header.Get("Click"))
+		assert.Contains(t, r.header.Get("Title"), "app-prod")
+		assert.Equal(t, "https://approve.example/ui", r.header.Get("Click"))
+		assert.Contains(t, r.body, "towline_env_set")
+		assert.NotContains(t, r.body, "hunter2", "tool arguments must not leave the server")
 	case <-time.After(5 * time.Second):
 		t.Fatal("no ntfy notification")
+	}
+}
+
+func TestServer_PendingCap(t *testing.T) {
+	_, ts := newTestServer(t)
+	for i := range maxPendingRecords {
+		resp := do(t, "POST", ts.URL+"/", testWebhookToken, fmt.Sprintf(`{"id":"cap%d","action":"x"}`, i))
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+	}
+	resp := do(t, "POST", ts.URL+"/", testWebhookToken, `{"id":"over","action":"x"}`)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+}
+
+func TestServer_SameOrigin(t *testing.T) {
+	s, err := NewServer(ServerConfig{WebhookToken: testWebhookToken, ApproverTokenHash: HashToken(testApproverToken), PublicURL: "https://approvals.example.com"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name, host, origin string
+		want               bool
+	}{
+		{"no origin", "127.0.0.1:8787", "", true},
+		{"matches host", "127.0.0.1:8787", "http://127.0.0.1:8787", true},
+		{"behind proxy, matches public URL", "127.0.0.1:8787", "https://approvals.example.com", true},
+		{"cross origin", "127.0.0.1:8787", "https://evil.example", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/ui/login", nil)
+			r.Host = tt.host
+			if tt.origin != "" {
+				r.Header.Set("Origin", tt.origin)
+			}
+			assert.Equal(t, tt.want, s.sameOrigin(r))
+		})
 	}
 }
 

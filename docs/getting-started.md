@@ -97,14 +97,14 @@ my-first-app/
 └── .gemini/settings.json       # Gemini CLI MCP config
 ```
 
-The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`.
+The MCP config files contain the project's API token (in an `env` block as `TOWLINE_PORTAINER_TOKEN`, not on the command line), so they're written with `0600` permissions and listed in `.gitignore`. If you run `towline init` inside an existing codebase, Towline appends any missing entries (`.mcp.json`, `.claude/`, `.cursor/`, `.gemini/`, `towline.json`) to its `.gitignore`. Existing `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json` and `.gemini/settings.json` files are merged (your other MCP servers and settings are kept), and `init` refuses to run if the directory already has a `towline.json` or if any of those files is tracked by git (untrack it with `git rm --cached` first).
 
 ### Using a compose template
 
 If you want to start with a pre-configured stack instead of an empty one:
 
 ```bash
-towline init my-web-app --template web-app
+towline init --template web-app my-web-app
 ```
 
 The `web-app` template sets up an Nginx app server, PostgreSQL 16, and Redis 7 with persistent storage — ready for your agent to customize.
@@ -180,7 +180,7 @@ This deletes the Portainer stack, service user, and team. Before deleting, Towli
 ### Use the web-app template for real projects
 
 ```bash
-towline init receipt-scanner --template web-app
+towline init --template web-app receipt-scanner
 ```
 
 This gives you an app + PostgreSQL + Redis stack. Ask your agent to swap the Nginx image for your actual application image.
@@ -188,10 +188,10 @@ This gives you an app + PostgreSQL + Redis stack. Ask your agent to swap the Ngi
 ### Set up a production tier
 
 ```bash
-towline init my-app --with-prod
+towline init --tier prod my-app
 ```
 
-This creates both `my-app-dev` and `my-app-prod` stacks with separate teams and API keys. In the prod tier, deploys, configuration changes, exec, and destructive operations need approval, depending on the mode you chose at setup:
+This creates the `my-app-prod` stack with its own team and API key (each project has a single tier). In the prod tier, deploys, configuration changes, exec, and destructive operations need approval, depending on the mode you chose at setup:
 
 - **Human mode**: keep `towline approvals serve` running. The agent sends the request, tells you what it wants to do, and waits. Approve it at `http://127.0.0.1:8787/ui` (log in with your approver token) or with `towline approvals approve <id>`; the agent then re-runs the call. Requests not decided within 30 minutes expire.
 - **Agent mode**: the agent gets a confirmation token on the first call and confirms by calling again with it. It's a deliberate second step, not a human gate.
@@ -212,7 +212,7 @@ Copy the bundled templates to override them:
 mkdir -p ~/.towline/templates/compose
 cp templates/compose/web-app.yml ~/.towline/templates/compose/my-custom.yml
 # Edit my-custom.yml to your needs
-towline init new-project --template my-custom
+towline init --template my-custom new-project
 ```
 
 ### Read the DevOps skill

@@ -79,8 +79,13 @@ func validateRoute(service, domain string) error {
 
 // Add creates a new Caddy route via the admin API.
 // The service must exist in this stack's compose file, and the domain must not
-// already be routed by another route. The compose content is returned unchanged
-// (Caddy routes are managed via API, not compose labels).
+// already be routed by another route.
+//
+// The route dials CaddyUpstreamHost(stack, service) rather than the bare
+// service name: Caddy sits on a network shared by several projects, where
+// Docker DNS resolves a service name to every project's container with that
+// name. The returned compose gives the service that alias on each of its
+// networks; when it differs from composeContent the caller must redeploy it.
 func (m *CaddyManager) Add(composeContent, service, domain string, port int) (string, error) {
 	if err := validateRoute(service, domain); err != nil {
 		return "", err
@@ -88,7 +93,9 @@ func (m *CaddyManager) Add(composeContent, service, domain string, port int) (st
 	if port < 1 || port > 65535 {
 		return "", fmt.Errorf("invalid port %d", port)
 	}
-	if _, _, err := findServiceNode(composeContent, service); err != nil {
+	upstreamHost := CaddyUpstreamHost(m.StackName, service)
+	updatedCompose, err := withNetworkAlias(composeContent, service, upstreamHost)
+	if err != nil {
 		return "", err
 	}
 
@@ -119,7 +126,7 @@ func (m *CaddyManager) Add(composeContent, service, domain string, port int) (st
 			{
 				Handler: "reverse_proxy",
 				Upstreams: []caddyUpstream{
-					{Dial: fmt.Sprintf("%s:%d", service, port)},
+					{Dial: fmt.Sprintf("%s:%d", upstreamHost, port)},
 				},
 			},
 		},
@@ -147,7 +154,7 @@ func (m *CaddyManager) Add(composeContent, service, domain string, port int) (st
 		return "", fmt.Errorf("Caddy API error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	return composeContent, nil
+	return updatedCompose, nil
 }
 
 // Remove deletes a Caddy route by its ID via the admin API.
@@ -245,6 +252,10 @@ func ParseCaddyRoutes(routes []caddyRoute, idPrefix string) []DomainMapping {
 			} else if len(parts) == 1 {
 				service = parts[0]
 			}
+			// The upstream host is "<service>.<stack>.towline" (or the bare
+			// service name for routes from older versions); service names
+			// cannot contain '.'.
+			service, _, _ = strings.Cut(service, ".")
 		}
 
 		mappings = append(mappings, DomainMapping{

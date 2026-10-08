@@ -60,9 +60,9 @@ Commands:
                         --tier <dev|prod>  Deployment tier (default: dev)
   list           List all Towline projects on this machine
   destroy <name> Remove a project: deletes team, API key, stack, and local files
-  promote <name> Promote a project from dev to prod tier
-  rotate-keys    Rotate the Portainer API key for a project
-  status <name>  Show project status (stack state, tier, endpoint)
+  promote <name> Promote a project from dev to prod tier (not yet implemented)
+  rotate-keys    Rotate the Portainer API key for a project (not yet implemented)
+  status <name>  Show project status (not yet implemented)
   update         Update towline to the latest release from GitHub
                  Flags: --check  Only check for updates, don't install
                         --force  Force update even if already on latest
@@ -78,7 +78,9 @@ Commands:
 
 What your agent gets:
   After 'towline init', the project directory contains:
-  - .claude/settings.json    MCP config that launches towline-mcp
+  - .mcp.json                MCP config that launches towline-mcp
+                             (also .cursor/mcp.json, .gemini/settings.json)
+  - .claude/settings.json    Claude Code permission for the towline MCP tools
   - CLAUDE.md                Agent instructions with tool reference
   - skills/towline-devops.md Operational skill (deployment, debugging, rollback)
   - docker-compose.yml       From template or pack

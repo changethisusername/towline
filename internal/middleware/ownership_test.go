@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
@@ -344,4 +345,109 @@ func TestContainerOwnership_OtherEnvironmentRejected(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "outside this stack's scope")
 	assert.False(t, called)
+}
+
+func TestEnvResolver(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial int
+		lookups []int // successive lookup results
+		want    []int // EnvID after each call
+		calls   int
+	}{
+		{name: "known at startup never looks up", initial: 3, want: []int{3, 3}, calls: 0},
+		{name: "resolved on first use", initial: 0, lookups: []int{2}, want: []int{2, 2}, calls: 1},
+		{name: "retries until stack exists", initial: 0, lookups: []int{0, 0, 5}, want: []int{0, 0, 5, 5}, calls: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			r := NewEnvResolver(tt.initial, func() int {
+				calls++
+				return tt.lookups[calls-1]
+			})
+			for i, want := range tt.want {
+				assert.Equal(t, want, r.EnvID(), "call %d", i)
+			}
+			assert.Equal(t, tt.calls, calls)
+		})
+	}
+}
+
+func TestEnvResolver_Bind(t *testing.T) {
+	envID := 0
+	found := 0
+	r := NewEnvResolver(0, func() int { return found })
+	seen := -1
+	handler := r.Bind(&envID)(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		seen = envID
+		return mcp.NewToolResultText("executed"), nil
+	})
+
+	_, err := handler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+	assert.Equal(t, 0, seen)
+
+	found = 4
+	_, err = handler(context.Background(), makeRequest(nil))
+	require.NoError(t, err)
+	assert.Equal(t, 4, seen)
+	assert.Equal(t, 4, envID)
+
+	// Concurrent calls must not race on the bound field (run with -race).
+	shared := 0
+	r = NewEnvResolver(0, func() int { return 9 })
+	handler = r.Bind(&shared)(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText(fmt.Sprint(shared)), nil
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := handler(context.Background(), makeRequest(nil))
+			assert.NoError(t, err)
+			assert.Equal(t, "9", res.Content[0].(mcp.TextContent).Text)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestContainerOwnership_LazyEnvironment(t *testing.T) {
+	tests := []struct {
+		name     string
+		lookup   int
+		reqEnv   float64
+		wantText string
+		wantEnv  int // environment of the ownership inspect; -1 if none
+	}{
+		{name: "stack created after startup is checked in its environment", lookup: 2, reqEnv: 2, wantText: "executed", wantEnv: 2},
+		{name: "other environment rejected once resolved", lookup: 2, reqEnv: 1, wantText: "outside this stack's scope", wantEnv: -1},
+		{name: "unresolved environment cannot verify ownership", lookup: 0, reqEnv: 1, wantText: "does not belong", wantEnv: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnv := -1
+			proxyFn := func(opts models.DockerProxyRequestOptions) ([]byte, error) {
+				gotEnv = opts.EnvironmentID
+				project := ""
+				if opts.EnvironmentID > 0 {
+					project = "myapp"
+				}
+				return json.Marshal(map[string]any{"Config": map[string]any{"Labels": map[string]any{"com.docker.compose.project": project}}})
+			}
+			resolver := NewEnvResolver(0, func() int { return tt.lookup })
+			ownership := NewContainerOwnership("myapp", 0, proxyFn, WithEnvResolver(resolver))
+			handler := ownership.ForDockerProxy()(passthroughHandler())
+
+			result, err := handler(context.Background(), makeRequest(map[string]any{
+				"environmentId": tt.reqEnv,
+				"dockerAPIPath": "/containers/abc/json",
+				"method":        "GET",
+			}))
+			require.NoError(t, err)
+			assert.Contains(t, result.Content[0].(mcp.TextContent).Text, tt.wantText)
+			assert.Equal(t, tt.wantEnv, gotEnv)
+		})
+	}
 }

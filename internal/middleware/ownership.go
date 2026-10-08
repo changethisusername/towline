@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sync"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -28,17 +29,85 @@ func extractContainerID(path string) string {
 	return id
 }
 
+// EnvResolver holds the scoped stack's environment ID. While the ID is
+// unknown (the stack does not exist yet, or Portainer was unreachable at
+// startup) each use looks it up again; once found it is cached.
+type EnvResolver struct {
+	mu     sync.Mutex
+	id     int
+	lookup func() int
+
+	// bindMu guards the int fields kept in sync by Bind.
+	bindMu sync.RWMutex
+}
+
+// NewEnvResolver returns a resolver starting at id (0 if unknown). lookup
+// returns the current environment ID, or 0 if it cannot be determined.
+func NewEnvResolver(id int, lookup func() int) *EnvResolver {
+	return &EnvResolver{id: id, lookup: lookup}
+}
+
+// EnvID returns the environment ID, looking it up if it is still unknown.
+// It returns 0 while the ID cannot be determined.
+func (r *EnvResolver) EnvID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.id <= 0 && r.lookup != nil {
+		if id := r.lookup(); id > 0 {
+			r.id = id
+		}
+	}
+	return r.id
+}
+
+// Bind returns a middleware that copies the resolved environment ID into
+// *dst before each call (for handlers that read a plain int field) and runs
+// the call under a read lock, so the write never races a handler's read.
+// All handlers reading *dst must be wrapped with the same resolver.
+func (r *EnvResolver) Bind(dst *int) MiddlewareFunc {
+	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			if id := r.EnvID(); id > 0 {
+				r.bindMu.RLock()
+				stale := *dst != id
+				r.bindMu.RUnlock()
+				if stale {
+					r.bindMu.Lock()
+					*dst = id
+					r.bindMu.Unlock()
+				}
+			}
+			r.bindMu.RLock()
+			defer r.bindMu.RUnlock()
+			return next(ctx, request)
+		}
+	}
+}
+
 // ContainerOwnership enforces that Docker proxy calls only target containers
 // belonging to the scoped stack.
 type ContainerOwnership struct {
 	stackName string
-	envID     int
+	env       *EnvResolver
 	proxyFn   func(opts models.DockerProxyRequestOptions) ([]byte, error)
 }
 
+// OwnershipOption configures a ContainerOwnership.
+type OwnershipOption func(*ContainerOwnership)
+
+// WithEnvResolver makes ownership checks use r for the environment ID, so an
+// ID that was unknown at startup is picked up once the stack exists.
+func WithEnvResolver(r *EnvResolver) OwnershipOption {
+	return func(o *ContainerOwnership) { o.env = r }
+}
+
 // NewContainerOwnership creates a new ContainerOwnership middleware.
-func NewContainerOwnership(stackName string, envID int, proxyFn func(opts models.DockerProxyRequestOptions) ([]byte, error)) *ContainerOwnership {
-	return &ContainerOwnership{stackName: stackName, envID: envID, proxyFn: proxyFn}
+func NewContainerOwnership(stackName string, envID int, proxyFn func(opts models.DockerProxyRequestOptions) ([]byte, error), opts ...OwnershipOption) *ContainerOwnership {
+	o := &ContainerOwnership{stackName: stackName, env: NewEnvResolver(envID, nil), proxyFn: proxyFn}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
 }
 
 // ForDockerProxy returns a middleware function that enforces container ownership
@@ -53,13 +122,14 @@ func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 			// Ownership is checked in this stack's environment, so the request
 			// must go to that same environment; otherwise a container name the
 			// stack owns here could address another project's container there.
-			if o.envID > 0 {
+			stackEnvID := o.env.EnvID()
+			if stackEnvID > 0 {
 				envID, err := parser.GetInt("environmentId", true)
 				if err != nil {
 					return mcp.NewToolResultErrorFromErr("invalid environmentId parameter", err), nil
 				}
-				if envID != o.envID {
-					return mcp.NewToolResultError(fmt.Sprintf("environment %d is outside this stack's scope (environment %d)", envID, o.envID)), nil
+				if envID != stackEnvID {
+					return mcp.NewToolResultError(fmt.Sprintf("environment %d is outside this stack's scope (environment %d)", envID, stackEnvID)), nil
 				}
 			}
 
@@ -83,7 +153,7 @@ func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 				return next(ctx, request)
 			}
 
-			owned, err := o.checkOwnership(containerID)
+			owned, err := o.checkOwnership(stackEnvID, containerID)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to verify container ownership: %v", err)), nil
 			}
@@ -96,9 +166,9 @@ func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 	}
 }
 
-func (o *ContainerOwnership) checkOwnership(containerID string) (bool, error) {
+func (o *ContainerOwnership) checkOwnership(envID int, containerID string) (bool, error) {
 	body, err := o.proxyFn(models.DockerProxyRequestOptions{
-		EnvironmentID: o.envID,
+		EnvironmentID: envID,
 		Method:        "GET",
 		Path:          fmt.Sprintf("/containers/%s/json", containerID),
 	})

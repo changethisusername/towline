@@ -11,7 +11,9 @@
         "-approval-mode", {{json .ApprovalMode}}{{if .ApprovalWebhook}},
         "-approval-webhook", {{json .ApprovalWebhook}}{{end}}{{end}}{{if .ComposePolicyOff}},
         "-compose-policy", "off"{{end}}{{if .AllowBindMounts}},
-        "-allow-bind-mounts", {{json .AllowBindMounts}}{{end}}
+        "-allow-bind-mounts", {{json .AllowBindMounts}}{{end}}{{if .AllowNetworks}},
+        "-allow-networks", {{json .AllowNetworks}}{{end}}{{if .AllowVolumes}},
+        "-allow-volumes", {{json .AllowVolumes}}{{end}}
       ],
       "env": {
         "TOWLINE_PORTAINER_TOKEN": {{json .APIToken}}{{if and (eq .Tier "prod") .ApprovalWebhookToken}},

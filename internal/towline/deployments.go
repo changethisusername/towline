@@ -58,6 +58,9 @@ func (h *Handlers) HandleDeployments() server.ToolHandlerFunc {
 
 // RecordDeployment appends a deployment entry to the stack's deployment history.
 func (h *Handlers) RecordDeployment(description, previousCompose, newCompose, outcome string) error {
+	h.stackMu.Lock()
+	defer h.stackMu.Unlock()
+
 	entries, err := h.readDeployments()
 	if err != nil {
 		entries = []DeploymentEntry{}
@@ -290,7 +293,14 @@ func appendDeploymentEntry(env []models.LocalStackEnvVar, description, previousC
 // (used when the agent omits env, so an update does not wipe it) and the
 // internal _TOWLINE_* env with a deployment history entry for this update
 // appended (so an update neither erases nor skips the history).
+//
+// The read is serialized with the towline tools' read-modify-write cycles.
+// The update itself is performed afterwards by the wrapped upstream handler,
+// outside this lock.
 func (h *Handlers) PrepareStackUpdate(newCompose string) (userEnv, internalEnv []models.LocalStackEnvVar, err error) {
+	h.stackMu.Lock()
+	defer h.stackMu.Unlock()
+
 	stack, err := h.findStack()
 	if err != nil {
 		return nil, nil, err

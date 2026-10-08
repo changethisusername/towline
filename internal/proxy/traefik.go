@@ -25,37 +25,68 @@ var domainRegex = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-
 // serviceNameRegex validates compose service names.
 var serviceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_\-]*$`)
 
-// Add parses compose YAML, adds Traefik labels to the specified service, and returns updated compose.
-// Uses yaml.Node to preserve document structure, comments, and key ordering.
-func (m *TraefikManager) Add(composeContent, service, domain string, port int) (string, error) {
-	if !domainRegex.MatchString(domain) {
-		return "", fmt.Errorf("invalid domain %q: must be a valid hostname", domain)
+// singleHostRule returns the host of a rule of the exact form Host(`host`).
+func singleHostRule(rule string) (string, bool) {
+	m := singleHostRuleRegex.FindStringSubmatch(strings.TrimSpace(rule))
+	if m == nil {
+		return "", false
 	}
-	if !serviceNameRegex.MatchString(service) {
-		return "", fmt.Errorf("invalid service name %q: must contain only letters, digits, hyphens, and underscores", service)
+	return m[1], true
+}
+
+var singleHostRuleRegex = regexp.MustCompile("^Host\\(`([^`]+)`\\)$")
+
+// Add parses compose YAML, adds Traefik labels to the specified service, and returns updated compose.
+//
+// Labels are edited in place: existing labels keep their order and form,
+// traefik.* entries this router needs are updated where they are and the
+// others appended. A service has one Towline router, so a second domain on
+// the same service is refused rather than silently replacing the first.
+// Labels shared through YAML anchors, aliases or merge keys are refused
+// rather than rewritten.
+func (m *TraefikManager) Add(composeContent, service, domain string, port int) (string, error) {
+	if err := validateRoute(service, domain); err != nil {
+		return "", err
+	}
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("invalid port %d", port)
 	}
 
 	doc, svcNode, err := findServiceNode(composeContent, service)
 	if err != nil {
 		return "", err
 	}
+	labels, err := editableLabels(doc.Content[0], svcNode, service)
+	if err != nil {
+		return "", err
+	}
 
 	router := m.routerName(service)
-
-	newLabels := map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", router):                      fmt.Sprintf("Host(`%s`)", domain),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", router):               "websecure",
-		fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", router):          "letsencrypt",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", router): strconv.Itoa(port),
+	ruleKey := fmt.Sprintf("traefik.http.routers.%s.rule", router)
+	if rule, ok := labels.get(ruleKey); ok {
+		if host, single := singleHostRule(rule); single && strings.EqualFold(host, domain) {
+			return "", fmt.Errorf("domain %q is already routed to service %q", domain, service)
+		}
+		return "", fmt.Errorf("service %q already has a Traefik route (%s=%s); only one domain per service is supported, remove the existing domain first", service, ruleKey, rule)
 	}
 
-	existing := getLabelsMapFromNode(svcNode)
-	for k, v := range newLabels {
-		existing[k] = v
+	// The same host on another service of this stack would make Traefik
+	// pick a router arbitrarily.
+	mappings, err := m.List(composeContent)
+	if err != nil {
+		return "", err
+	}
+	for _, mp := range mappings {
+		if strings.EqualFold(mp.Domain, domain) {
+			return "", fmt.Errorf("domain %q is already routed to service %q", domain, mp.Service)
+		}
 	}
 
-	setLabelsOnNode(svcNode, existing)
+	labels.set("traefik.enable", "true")
+	labels.set(ruleKey, fmt.Sprintf("Host(`%s`)", domain))
+	labels.set(fmt.Sprintf("traefik.http.routers.%s.entrypoints", router), "websecure")
+	labels.set(fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", router), "letsencrypt")
+	labels.set(fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", router), strconv.Itoa(port))
 
 	out, err := yaml.Marshal(doc)
 	if err != nil {
@@ -65,51 +96,62 @@ func (m *TraefikManager) Add(composeContent, service, domain string, port int) (
 	return string(out), nil
 }
 
-// Remove removes Traefik labels for the given domain from the specified service.
-// Uses yaml.Node to preserve document structure, comments, and key ordering.
+// Remove removes the Traefik router for the given domain from the specified service.
+//
+// The router's rule must be exactly Host(`domain`); otherwise nothing is
+// changed and an error is returned, so a typo or a rule covering other
+// hosts never triggers a redeploy that drops routing. Other labels keep
+// their order and form.
 func (m *TraefikManager) Remove(composeContent, service, domain string) (string, error) {
+	if err := validateRoute(service, domain); err != nil {
+		return "", err
+	}
+
 	doc, svcNode, err := findServiceNode(composeContent, service)
+	if err != nil {
+		return "", err
+	}
+	labels, err := editableLabels(doc.Content[0], svcNode, service)
 	if err != nil {
 		return "", err
 	}
 
 	router := m.routerName(service)
-	existing := getLabelsMapFromNode(svcNode)
-
-	// Check if the Host rule actually matches the domain we want to remove
 	ruleKey := fmt.Sprintf("traefik.http.routers.%s.rule", router)
-	if ruleVal, ok := existing[ruleKey]; ok {
-		if !strings.Contains(ruleVal, domain) {
-			return "", fmt.Errorf("domain %q not found on service %q", domain, service)
+	rule, ok := labels.get(ruleKey)
+	if !ok {
+		return "", fmt.Errorf("service %q has no Traefik route managed by Towline (no %s label); nothing to remove", service, ruleKey)
+	}
+	host, single := singleHostRule(rule)
+	if !single {
+		if strings.Contains(strings.ToLower(rule), strings.ToLower(domain)) {
+			return "", fmt.Errorf("the route of service %q is %q, which is not a single Host rule; edit the labels in the compose file to remove %q", service, rule, domain)
 		}
+		return "", fmt.Errorf("domain %q not found on service %q (rule is %q)", domain, service, rule)
+	}
+	if !strings.EqualFold(host, domain) {
+		return "", fmt.Errorf("domain %q not found on service %q (it routes %q)", domain, service, host)
 	}
 
 	// Remove all labels associated with this router
 	routerPrefix := fmt.Sprintf("traefik.http.routers.%s.", router)
 	servicePrefix := fmt.Sprintf("traefik.http.services.%s.", router)
-	for k := range existing {
-		if strings.HasPrefix(k, routerPrefix) || strings.HasPrefix(k, servicePrefix) {
-			delete(existing, k)
-		}
-	}
+	labels.deleteMatching(func(k string) bool {
+		return strings.HasPrefix(k, routerPrefix) || strings.HasPrefix(k, servicePrefix)
+	})
 
 	// If no traefik labels remain, remove traefik.enable too
 	hasTraefikLabels := false
-	for k := range existing {
+	for _, k := range labels.keys() {
 		if strings.HasPrefix(k, "traefik.http.") {
 			hasTraefikLabels = true
 			break
 		}
 	}
 	if !hasTraefikLabels {
-		delete(existing, "traefik.enable")
+		labels.deleteMatching(func(k string) bool { return k == "traefik.enable" })
 	}
-
-	if len(existing) == 0 {
-		removeNodeKey(svcNode, "labels")
-	} else {
-		setLabelsOnNode(svcNode, existing)
-	}
+	labels.dropIfEmpty()
 
 	out, err := yaml.Marshal(doc)
 	if err != nil {
@@ -230,57 +272,6 @@ func nodeLookup(mapping *yaml.Node, key string) *yaml.Node {
 		}
 	}
 	return nil
-}
-
-// getLabelsMapFromNode reads labels from a service yaml.Node (handles both map and sequence).
-func getLabelsMapFromNode(svcNode *yaml.Node) map[string]string {
-	result := make(map[string]string)
-	labelsNode := nodeLookup(svcNode, "labels")
-	if labelsNode == nil {
-		return result
-	}
-
-	switch labelsNode.Kind {
-	case yaml.MappingNode:
-		for i := 0; i+1 < len(labelsNode.Content); i += 2 {
-			result[labelsNode.Content[i].Value] = labelsNode.Content[i+1].Value
-		}
-	case yaml.SequenceNode:
-		for _, item := range labelsNode.Content {
-			if item.Kind == yaml.ScalarNode {
-				parts := strings.SplitN(item.Value, "=", 2)
-				if len(parts) == 2 {
-					result[parts[0]] = parts[1]
-				}
-			}
-		}
-	}
-
-	return result
-}
-
-// setLabelsOnNode replaces the labels key on a service node with a sequence of "key=value" strings.
-func setLabelsOnNode(svcNode *yaml.Node, labels map[string]string) {
-	// Build a new sequence node for labels
-	labelsNode := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-	for k, v := range labels {
-		labelsNode.Content = append(labelsNode.Content, &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: fmt.Sprintf("%s=%s", k, v),
-			Tag:   "!!str",
-		})
-	}
-
-	// Find and replace existing labels node, or append
-	for i := 0; i+1 < len(svcNode.Content); i += 2 {
-		if svcNode.Content[i].Value == "labels" {
-			svcNode.Content[i+1] = labelsNode
-			return
-		}
-	}
-	// Not found — append
-	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: "labels", Tag: "!!str"}
-	svcNode.Content = append(svcNode.Content, keyNode, labelsNode)
 }
 
 // removeNodeKey removes a key-value pair from a mapping node.

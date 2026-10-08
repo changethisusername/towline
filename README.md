@@ -17,7 +17,7 @@ AI coding agents can write code, run tests, and manage git. But they stop at the
 ## The idea
 
 ```
-  $ towline init my-saas --template ai-stack
+  $ towline init --template ai-stack my-saas
   $ cd my-saas && claude
 
   You: "Build a RAG chatbot with document upload. Deploy it, expose it
@@ -77,7 +77,7 @@ Points Towline at your Portainer instance (CE 2.28+). Interactive wizard — tak
 ### 3. Create a project
 
 ```bash
-towline init my-app --template web-app
+towline init --template web-app my-app
 ```
 
 Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, `-`, `_`).
@@ -113,7 +113,7 @@ Every template gives your agent a running stack and the knowledge to operate it.
 | `n8n` | n8n + PostgreSQL | n8n workflow operations skill |
 
 ```bash
-towline init my-project --template ai-stack
+towline init --template ai-stack my-project
 ```
 
 Packs are the key to making agents effective at specific domains. The compose file gives them infrastructure; the skills teach them how to operate it; the MCP configs give them additional tools. [Create your own packs](#custom-packs) for any stack.
@@ -170,7 +170,7 @@ Each project gets a dedicated Portainer team with its own API key. The team gets
 
 **Layer 2 — MCP stack filtering** (agent experience)
 Docker API responses are filtered to show only this project's containers. Clear error messages if an agent references anything out of scope. On top of that:
-- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged`, `cap_add`, `devices`, host/container `network_mode`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts` or non-local drivers, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), and top-level `include`/`extends`. Named volumes and tmpfs are fine. Specific bind mounts can be allowed per project in `towline.json` (see [Per-project](#per-project-towlinejson)).
+- **Compose security policy** (dev and prod): `createLocalStack` / `updateLocalStack` reject compose files that could escape the container sandbox — `privileged` (including privileged `post_start`/`pre_stop` hooks), `cap_add`, `devices`, non-GPU `deploy.resources.reservations.devices`, `network_mode` other than `bridge`/`none`, host/container `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`, unconfined/disabled `security_opt`, host bind mounts (absolute, `./`, `~`, `${VAR}` sources, or `type: bind`), `volumes_from`, volume `driver_opts`, non-local drivers, `external` or `name`, network `external`/`name` (unless allowed), `driver_opts` or drivers other than `bridge`/`overlay`, `secrets`/`configs` with `file:`, `env_file` outside the stack directory, `external_links`, `build` from a local context (use a git/https URL or a prebuilt image), top-level `include`/`extends`, and files with more than one YAML document. Network aliases and container names under `.towline` are reserved for Caddy routing (a service may only use its own `<service>.<stack>.towline`). Named volumes and tmpfs are fine. Specific bind mounts and external networks can be allowed per project in `towline.json` (see [Per-project](#per-project-towlinejson)).
 - **Restricted `dockerProxy`**: the only mutations allowed are container lifecycle actions (`start`, `stop`, `restart`, `kill`, `pause`, `unpause`, `wait`, `resize`, `rename`, `update`) and `DELETE /containers/{id}` on the stack's own containers, in the stack's own environment. Container create, exec, archive upload, and anything on networks, volumes, images, or system are rejected, as are paths with query strings, `%`-encoding, `..` segments and similar tricks.
 
 **Layer 3 — Tier-based approval** (deployment control)
@@ -194,7 +194,7 @@ Agent: [re-calls with the token] → [deploys] → [verifies health] → "All se
 ```
 
 - `approvals setup` generates a **webhook token** (put in the generated MCP config as `TOWLINE_APPROVAL_WEBHOOK_TOKEN`; it can only submit and poll requests, never approve) and an **approver token**, shown once (only its SHA-256 is stored). Use the approver token to log in to the UI or with `towline approvals list | approve <id> | reject <id>`, which prompt for it on stdin — deliberately not read from env vars or flags, so agents in the same shell can't pick it up.
-- Optional: `--ntfy <topic URL>` for push notifications, `--public-url` for the link in them, `--listen` to change the address (a warning is printed if it listens beyond localhost — put it behind HTTPS).
+- Optional: `--ntfy <topic URL>` for push notifications, `--public-url` for the link in them (and set it when the UI sits behind a reverse proxy), `--listen` to change the address (a warning is printed if it listens beyond localhost — put it behind HTTPS).
 - The built-in server keeps requests in memory: restarting it drops pending requests (the agent just requests again).
 - To use your own server instead: `towline approvals setup --mode human --url <server> [--webhook-token <token>]`. It must implement:
 
@@ -263,7 +263,7 @@ mcps:
 ```
 
 ```bash
-towline init new-project --template my-pack
+towline init --template my-pack new-project
 ```
 
 The pack's skills are copied into the project alongside the base DevOps skill. MCP configs are merged into `.mcp.json`, `.cursor/mcp.json`, and `.gemini/settings.json`. Your agent gets domain expertise out of the box. Pack MCP servers run automatically with your privileges when the agent starts — only add servers from verified publishers, pinned to an exact version.
@@ -281,7 +281,7 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 | `towline refresh [--all \| <name>...]` | Bring existing projects up to date with this release (see [Upgrading](#upgrading)) |
 | `towline approvals setup` | Choose human or agent approval for prod operations |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`) |
-| `towline approvals list \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
+| `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
 | `towline update` | Update Towline to the latest release |
 | `towline promote <name>` | Add prod tier *(coming soon)* |
 | `towline rotate-keys <name>` | Rotate API credentials *(coming soon)* |
@@ -293,7 +293,8 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 |------|---------|-------------|
 | `--tier` | `dev` | `dev` (full autonomy) or `prod` (approval-gated) |
 | `--template` | `default` | Template or pack name |
-| `--with-prod` | `false` | Also create a prod-tier stack |
+
+Flags go before the project name (`towline init --tier prod my-app`); flags after it are rejected.
 
 ---
 
@@ -325,15 +326,15 @@ Configs from earlier releases have no `skip_tls_verify` key and keep skipping ce
 
 ### Per-project (`towline.json`)
 
-Created by `towline init`. Contains stack metadata and scoped credentials. The generated MCP configs (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`) pass the project token via the `TOWLINE_PORTAINER_TOKEN` env var and are written with `0600` permissions. All token-bearing files are in the generated `.gitignore`; in an existing codebase, `towline init` appends any missing entries to its `.gitignore`.
+Created by `towline init`. Contains stack metadata and scoped credentials. The generated MCP configs (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`) pass the project token via the `TOWLINE_PORTAINER_TOKEN` env var and are written with `0600` permissions. All token-bearing files are in the generated `.gitignore`; in an existing codebase, `towline init` appends any missing entries to its `.gitignore`. Existing agent configs are merged rather than replaced, and `init` refuses to run if the directory already has a `towline.json` or git tracks any token-bearing file.
 
 `towline.json` can also relax the compose security policy for one project (edited by you, not the agent):
 
 ```json
-"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."] }
+"compose_policy": { "mode": "enforce", "allow_bind_mounts": ["/srv/app", "."], "allow_networks": ["proxy"], "allow_volumes": ["legacy_data"] }
 ```
 
-An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `"mode": "off"` disables the policy. The other policy rules still apply when bind mounts are allowed. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-compose-policy off` into the MCP configs.
+An absolute path allows itself and anything below it; `"."` allows relative paths inside the stack directory; `..`, `~` and `${VAR}` sources are never allowed. `allow_networks` lists external networks (e.g. a shared Traefik network) by effective name (`name:` if set, else the key); `host`, `bridge` and `none` are never allowed. `allow_volumes` lists external or explicitly named volumes the same way (a volume named `<stack>_<key>`, compose's default, is always fine). `"mode": "off"` disables the policy. The other policy rules still apply. Run `towline refresh` after editing; this renders `-allow-bind-mounts` / `-allow-networks` / `-allow-volumes` / `-compose-policy off` into the MCP configs.
 
 ---
 
@@ -350,7 +351,7 @@ Existing projects keep working without `refresh` (legacy `-token` flag, agent-co
 - makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings
 - fixes permissions (`0600` files, `0700` dirs) and `.gitignore`, and warns if token-bearing files are tracked by git (`git rm --cached`; revoke the token if the repo was pushed)
 - moves the project team to the Standard user role, after checking the team is `team-<stack>` (`--keep-role` skips this)
-- on first run, allows the deployed stack's existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
+- on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`), its external or named volumes in `compose_policy.allow_volumes`, and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
 
 Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).
 

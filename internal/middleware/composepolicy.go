@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"path"
 	"sort"
 	"strings"
@@ -17,7 +20,8 @@ import (
 // via createLocalStack and updateLocalStack. It rejects settings that would let
 // a stack escape its container sandbox: privileged mode, host namespaces, host
 // bind mounts, device access, added capabilities, and file references that
-// read from the Portainer host filesystem.
+// read from the Portainer host filesystem, and volumes or networks that
+// belong to other projects.
 func NewComposePolicy(toolName string, policy ComposePolicy) MiddlewareFunc {
 	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 		if policy.Disabled || (toolName != "createLocalStack" && toolName != "updateLocalStack") {
@@ -31,7 +35,7 @@ func NewComposePolicy(toolName string, policy ComposePolicy) MiddlewareFunc {
 			}
 			if violations := policy.Validate(file); len(violations) > 0 {
 				return mcp.NewToolResultError("Compose file rejected by security policy:\n- " + strings.Join(violations, "\n- ") +
-					"\nIf the stack genuinely needs this, ask your human partner: they can allow specific bind mounts (or disable the policy) under compose_policy in towline.json and run 'towline refresh'."), nil
+					"\nIf the stack genuinely needs this, ask your human partner: they can allow specific bind mounts or external networks (or disable the policy) under compose_policy in towline.json and run 'towline refresh'."), nil
 			}
 			return next(ctx, request)
 		}
@@ -47,6 +51,68 @@ type ComposePolicy struct {
 	// path allows itself and everything below it; "." allows relative paths
 	// inside the stack directory.
 	AllowBindMounts []string
+	// AllowNetworks lists external networks (by effective name: "name" if
+	// set, else the key) that stacks may join, e.g. a shared proxy network.
+	// host, none and bridge are never allowed.
+	AllowNetworks []string
+	// StackName is the stack being deployed. Network aliases and container
+	// names under ".towline" are reserved for routing: a service may only
+	// use its own "<service>.<stack>.towline", so one project cannot answer
+	// for another project's routed service on a shared proxy network.
+	StackName string
+	// AllowVolumes lists external or explicitly named volumes (by effective
+	// name: "name" if set, else the key) that stacks may mount. A volume
+	// named "<stack>_<key>", compose's own default, is always allowed.
+	AllowVolumes []string
+}
+
+// allowsVolume reports whether an external or named volume may be used.
+func (p ComposePolicy) allowsVolume(key, name string) bool {
+	if name == "" || strings.Contains(name, "$") {
+		return false
+	}
+	if p.StackName != "" && name == p.StackName+"_"+key {
+		return true
+	}
+	for _, allowed := range p.AllowVolumes {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+// reservedNetworkNames are Docker's built-in networks; joining them as an
+// external network is never allowed, even when listed in AllowNetworks.
+var reservedNetworkNames = map[string]bool{"host": true, "none": true, "bridge": true}
+
+// allowsNetwork reports whether an external network name is on the allowlist.
+func (p ComposePolicy) allowsNetwork(name string) bool {
+	if name == "" || reservedNetworkNames[name] || strings.Contains(name, "$") {
+		return false
+	}
+	for _, allowed := range p.AllowNetworks {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+// externalNetworkName returns the effective name of a top-level network
+// that refers to a network outside the stack ("external" or "name" set),
+// and whether it does. The name is "" if it is not a plain string.
+func externalNetworkName(key string, net map[string]any) (string, bool) {
+	_, hasExternal := net["external"]
+	rawName, hasName := net["name"]
+	if !hasExternal && !hasName {
+		return "", false
+	}
+	if !hasName {
+		return key, true
+	}
+	name, _ := rawName.(string)
+	return name, true
 }
 
 // allowsBind reports whether a bind mount source is on the allowlist.
@@ -80,9 +146,16 @@ func ValidateCompose(content string) []string {
 // Validate checks compose content against the scoped-stack security policy
 // and returns a list of human-readable violations (empty if allowed).
 func (p ComposePolicy) Validate(content string) []string {
+	// Compose merges every "---" document in a file, so a policy that only
+	// read the first one could be bypassed by a later document.
 	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(content)))
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
 		return []string{fmt.Sprintf("compose file is not valid YAML: %v", err)}
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return []string{"compose file must contain a single YAML document (no \"---\" separators)"}
 	}
 
 	var v []string
@@ -115,6 +188,32 @@ func (p ComposePolicy) Validate(content string) []string {
 			if d, ok := vol["driver"].(string); ok && d != "local" {
 				add("volume %q: only the local volume driver is allowed", name)
 			}
+			if ext, ok := externalNetworkName(name, vol); ok && !p.allowsVolume(name, ext) {
+				add("volume %q: external or named volume %q is not allowed (it can mount another project's volume); a human can allow it in compose_policy.allow_volumes", name, ext)
+			}
+		}
+	}
+
+	if nets, ok := doc["networks"].(map[string]any); ok {
+		for name, raw := range nets {
+			net, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if ext, ok := externalNetworkName(name, net); ok {
+				switch {
+				case reservedNetworkNames[ext]:
+					add("network %q: joining the %q network is not allowed", name, ext)
+				case !p.allowsNetwork(ext):
+					add("network %q: external network %q is not allowed (it can join another project's network); a human can allow it in compose_policy.allow_networks", name, ext)
+				}
+			}
+			if _, ok := net["driver_opts"]; ok {
+				add("network %q: driver_opts are not allowed", name)
+			}
+			if d, ok := net["driver"]; ok && d != "bridge" && d != "overlay" {
+				add("network %q: only the bridge and overlay network drivers are allowed", name)
+			}
 		}
 	}
 
@@ -136,7 +235,20 @@ func (p ComposePolicy) Validate(content string) []string {
 
 // hostModeKeys are service keys where "host" or "container:*" shares a
 // namespace with the host or with a container outside the stack.
-var hostModeKeys = []string{"network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup"}
+// network_mode is checked separately against an allowlist.
+var hostModeKeys = []string{"pid", "ipc", "uts", "userns_mode", "cgroup"}
+
+// allowedNetworkModes are the network_mode values that cannot attach a
+// service to the host or to a network or container outside the stack.
+var allowedNetworkModes = map[string]bool{"bridge": true, "none": true}
+
+// lifecycleHookKeys hold commands compose runs inside the container; each
+// hook can request privileged mode independently of the service.
+var lifecycleHookKeys = []string{"post_start", "pre_stop"}
+
+// gpuCapabilities are the device reservation capabilities allowed in
+// deploy.resources.reservations.devices (GPU access via the NVIDIA runtime).
+var gpuCapabilities = map[string]bool{"gpu": true, "compute": true, "utility": true, "graphics": true, "video": true, "display": true, "compat32": true}
 
 // forbiddenServiceKeys grant host-level privileges regardless of value.
 var forbiddenServiceKeys = []string{"cap_add", "devices", "device_cgroup_rules", "cgroup_parent", "extends", "gpus", "external_links"}
@@ -160,6 +272,46 @@ func (p ComposePolicy) validateService(name string, svc map[string]any) []string
 		if _, ok := svc[key]; ok {
 			add("%q is not allowed", key)
 		}
+	}
+
+	// Compose also registers the service name itself as a DNS alias.
+	if strings.HasSuffix(strings.ToLower(name), ".towline") {
+		add("service name %q is reserved: names under .towline are used for routing", name)
+	}
+	for _, n := range dnsNames(svc) {
+		if strings.HasSuffix(strings.ToLower(n), ".towline") && (p.StackName == "" || n != name+"."+p.StackName+".towline") {
+			add("name %q is reserved: only %q may be used under .towline", n, name+"."+p.StackName+".towline")
+		}
+	}
+
+	if val, ok := svc["network_mode"]; ok {
+		if s, isString := val.(string); !isString || !allowedNetworkModes[s] {
+			add("network_mode %q is not allowed", fmt.Sprint(val))
+		}
+	}
+
+	for _, key := range lifecycleHookKeys {
+		raw, ok := svc[key]
+		if !ok {
+			continue
+		}
+		hooks, isList := raw.([]any)
+		if !isList {
+			add("%s must be a list of hooks", key)
+			continue
+		}
+		for _, h := range hooks {
+			hook, _ := h.(map[string]any)
+			if p, ok := hook["privileged"]; ok {
+				if b, isBool := p.(bool); !isBool || b {
+					add("%s hook privileged mode is not allowed", key)
+				}
+			}
+		}
+	}
+
+	for _, msg := range checkDeviceReservations(svc["deploy"]) {
+		add("%s", msg)
 	}
 
 	for _, key := range hostModeKeys {
@@ -208,6 +360,74 @@ func (p ComposePolicy) validateService(name string, svc map[string]any) []string
 		}
 	}
 
+	return v
+}
+
+// checkDeviceReservations rejects deploy.resources.reservations.devices
+// entries other than GPU reservations: like "devices", other drivers (e.g.
+// CDI) and options can give the container host devices.
+// dnsNames returns the names other containers can resolve a service by
+// beyond its service name: container_name and network aliases.
+func dnsNames(svc map[string]any) []string {
+	var names []string
+	if cn, ok := svc["container_name"].(string); ok {
+		names = append(names, cn)
+	}
+	nets, _ := svc["networks"].(map[string]any)
+	for _, raw := range nets {
+		net, _ := raw.(map[string]any)
+		aliases, _ := net["aliases"].([]any)
+		for _, a := range aliases {
+			if s, ok := a.(string); ok {
+				names = append(names, s)
+			}
+		}
+	}
+	return names
+}
+
+func checkDeviceReservations(deploy any) []string {
+	d, _ := deploy.(map[string]any)
+	resources, _ := d["resources"].(map[string]any)
+	reservations, _ := resources["reservations"].(map[string]any)
+	raw, ok := reservations["devices"]
+	if !ok {
+		return nil
+	}
+	const msg = "deploy.resources.reservations.devices %s is not allowed; only GPU reservations (capabilities: [gpu], driver nvidia) are permitted"
+	devices, isList := raw.([]any)
+	if !isList {
+		return []string{fmt.Sprintf(msg, "value")}
+	}
+	var v []string
+	for _, rawDev := range devices {
+		dev, isMap := rawDev.(map[string]any)
+		if !isMap {
+			v = append(v, fmt.Sprintf(msg, "entry"))
+			continue
+		}
+		for key, val := range dev {
+			switch key {
+			case "count", "device_ids":
+			case "driver":
+				if val != "nvidia" {
+					v = append(v, fmt.Sprintf(msg, fmt.Sprintf("driver %q", fmt.Sprint(val))))
+				}
+			case "capabilities":
+			default:
+				v = append(v, fmt.Sprintf(msg, fmt.Sprintf("%q", key)))
+			}
+		}
+		caps, _ := dev["capabilities"].([]any)
+		if len(caps) == 0 {
+			v = append(v, fmt.Sprintf(msg, "entry without capabilities"))
+		}
+		for _, c := range caps {
+			if s, _ := c.(string); !gpuCapabilities[s] {
+				v = append(v, fmt.Sprintf(msg, fmt.Sprintf("capability %q", fmt.Sprint(c))))
+			}
+		}
+	}
 	return v
 }
 
@@ -318,6 +538,50 @@ func isSafeRelativePath(p string) bool {
 	}
 	clean := path.Clean(p)
 	return clean != ".." && !strings.HasPrefix(clean, "../")
+}
+
+// ExternalVolumeNames returns the effective names of top-level volumes that
+// are external or explicitly named.
+func ExternalVolumeNames(content string) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return nil
+	}
+	vols, _ := doc["volumes"].(map[string]any)
+	var names []string
+	for key, raw := range vols {
+		vol, _ := raw.(map[string]any)
+		if name, ok := externalNetworkName(key, vol); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ExternalNetworkNames returns the effective names of top-level networks
+// that refer to networks outside the stack ("external" or "name" set), in
+// key order. Names that are not plain strings are skipped.
+func ExternalNetworkNames(content string) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return nil
+	}
+	nets, _ := doc["networks"].(map[string]any)
+	keys := make([]string, 0, len(nets))
+	for key := range nets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var out []string
+	for _, key := range keys {
+		net, _ := nets[key].(map[string]any)
+		if name, ok := externalNetworkName(key, net); ok && name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // BindMountSources returns the host paths bind mounted by services in a

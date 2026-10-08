@@ -49,13 +49,13 @@ make fmt            # gofmt
 - Fork additions are confined to new files (middleware package, config extensions) and modified entry point — no upstream handler changes
 - Exposes high-level tools (`towline_service_health`, `towline_service_logs`, `towline_env_get/set`, `towline_domains_*`, `towline_scale`, `towline_deployments`, `towline_exec`) on top of upstream's stack CRUD and Docker proxy
 
-**Approval server** (`towline approvals serve`, `internal/approval/server.go`): ships with the CLI. Implements the webhook contract for towline-mcp, plus a web UI (`/ui`) and approver API for humans, authenticated by an approver token whose SHA-256 is stored in `~/.towline/config.yaml`. The webhook token given to towline-mcp can submit and poll, never decide. Optional ntfy notifications.
+**Approval server** (`towline approvals serve`, `internal/approval/server.go`): ships with the CLI. Implements the webhook contract for towline-mcp, plus a web UI (`/ui`) and approver API for humans, authenticated by an approver token whose SHA-256 is stored in `~/.towline/config.yaml`. The webhook token given to towline-mcp can submit and poll, never decide. Optional ntfy notifications (action, project and short id only; tool arguments stay on the server). Pending requests are capped at 100.
 
 **towline CLI** (scaffolding tool):
 - `towline init <project>` creates: Portainer team + scoped API key + stack + `.claude/settings.json` + CLAUDE.md + compose files + git init
 - Global config lives in `~/.towline/config.yaml` (portainer_url, admin key, env ID, projects dir, `skip_tls_verify`, `approval:` block)
 - `towline refresh [--all|name...]` upgrades existing projects in place: merges the towline entry into MCP configs (keeping other servers and user flags), fixes permissions/.gitignore, moves teams to the Standard user role, and grandfathers deployed bind mounts into `towline.json` `compose_policy`
-- `towline approvals setup|serve|list|approve|reject` configures and runs prod approvals
+- `towline approvals setup|serve|list|show|approve|reject` configures and runs prod approvals
 - Templates in `~/.towline/templates/` are interpolated with `{{PROJECT_NAME}}`, `{{STACK_NAME}}`, `{{TIER}}`
 
 ### Three-layer permissions model
@@ -73,7 +73,7 @@ POST /{id}/approve — approve (human only)
 POST /{id}/reject  — reject (human only)
 ```
 
-towline-mcp only calls `POST /` and `GET /{id}` (with `Authorization: Bearer $TOWLINE_APPROVAL_WEBHOOK_TOKEN` if set). The first call to a gated tool submits the request and returns `approvalToken` (the request id); the agent re-calls with identical arguments plus `approvalToken`, and the call proceeds only once `GET /{id}` returns `approved`. Tokens are single-use, bound to tool + arguments, and expire after 30 minutes. The approval server must authenticate approve/reject; the agent must not be able to reach those endpoints.
+towline-mcp only calls `POST /` and `GET /{id}` (with `Authorization: Bearer $TOWLINE_APPROVAL_WEBHOOK_TOKEN` if set). The first call to a gated tool submits the request under a random request id and returns a separate `approvalToken` to the agent (never the id, so an agent that can reach the server can't file its own request under it); the agent re-calls with identical arguments plus `approvalToken`, and the call proceeds only once `GET /{id}` returns `approved`. Tokens are single-use (claimed atomically, so concurrent re-calls run once), bound to tool + arguments, and expire after 30 minutes. The approval server must authenticate approve/reject; the agent must not be able to reach those endpoints.
 
 ### MCP tool categories
 

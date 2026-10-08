@@ -29,16 +29,13 @@ This guide covers day-to-day usage of Towline — how to work with your agent to
 towline init my-app
 
 # Dev project with web-app template (app + Postgres + Redis)
-towline init my-app --template web-app
-
-# Project with both dev and prod tiers
-towline init my-app --with-prod
+towline init --template web-app my-app
 
 # Direct prod project
-towline init my-app --tier prod
+towline init --tier prod my-app
 
 # Template pack (compose + skills)
-towline init my-app --template ai-stack
+towline init --template ai-stack my-app
 ```
 
 Project names must match `^[a-z0-9][a-z0-9_-]{0,62}$` (lowercase letters, digits, `-` and `_`, starting with a letter or digit).
@@ -63,7 +60,7 @@ Shows all Towline-managed projects with their stack name, tier, and status.
 
 ```bash
 towline destroy my-app           # interactive confirmation
-towline destroy my-app --confirm # skip confirmation
+towline destroy --confirm my-app # skip confirmation
 ```
 
 This removes the Portainer stack, service user, and team. Because `towline.json` lives in the project directory (which the agent can write), each ID in it is verified against Portainer before deletion: the stack must be named `<project>-<tier>`, the user `towline-<stack>`, and the team `team-<stack>`. Mismatches are skipped with a message. Local files are preserved — delete them manually if needed. Projects created before name validation existed can still be destroyed; only names containing `/`, `\`, or equal to `.`/`..` are rejected.
@@ -129,35 +126,42 @@ After a successful `deleteLocalStack`, the agent can call `createLocalStack` aga
 
 In both dev and prod, `createLocalStack` and `updateLocalStack` reject compose files that could give a container access to the host:
 
-- `privileged`, `cap_add`, `devices`
-- `network_mode: host` or `container:...`, `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`
+- `privileged` (also on `post_start` / `pre_stop` hooks), `cap_add`, `devices`
+- `deploy.resources.reservations.devices` other than GPU reservations (`capabilities: [gpu]`, driver `nvidia`)
+- `network_mode` other than `bridge` or `none`; `host` or `container:...` for `pid`, `ipc`, `uts`, `userns_mode`, `cgroup`
 - `security_opt` with `unconfined` or `disable`
 - Host bind mounts — absolute, relative (`./`), `~`, or `${VAR}` sources, and long-syntax `type: bind`
 - `volumes_from`
-- Volumes with `driver_opts` or a non-`local` driver
+- Volumes with `driver_opts`, a non-`local` driver, `external` or `name` (they could mount another project's volume)
+- Networks with `external` or `name` (unless allowed, see below), `driver_opts`, or a driver other than `bridge` / `overlay`
 - `secrets` / `configs` with `file:`
 - `env_file` outside the stack directory
 - Top-level `include` / `extends`
+- More than one YAML document (`---`) in the file
 
 Named volumes and `tmpfs` are fine. Rejection messages tell the agent to ask you if the stack genuinely needs the setting.
 
-#### Allowing bind mounts per project
+#### Allowing bind mounts and external networks per project
 
-If a project really needs host paths, you (the human, not the agent) can relax the policy in its `towline.json`:
+If a project really needs host paths or a shared network, you (the human, not the agent) can relax the policy in its `towline.json`:
 
 ```json
 "compose_policy": {
   "mode": "enforce",
-  "allow_bind_mounts": ["/srv/app", "."]
+  "allow_bind_mounts": ["/srv/app", "."],
+  "allow_networks": ["proxy"],
+  "allow_volumes": ["legacy_data"]
 }
 ```
 
 - An absolute path allows itself and anything below it (`/srv/app` allows `/srv/app/data`).
 - `"."` allows relative paths inside the stack directory (e.g. `./config`).
 - `..`, `~` and `${VAR}` sources are never allowed.
+- `allow_networks` lists external networks the stack may join (e.g. a shared Traefik `proxy` network), matched on the effective name: `name:` if set, else the network's key. `host`, `bridge` and `none` are never allowed.
+- `allow_volumes` lists external or explicitly named volumes the stack may mount, by the same effective name. A volume named `<stack>_<key>` (compose's default) is always allowed.
 - `"mode": "off"` disables the compose policy for the project entirely.
 
-All other policy rules still apply when bind mounts are allowed. After editing, run `towline refresh` in the project (or `towline refresh <name>`) — it renders the policy into the MCP configs as `-allow-bind-mounts /srv/app,.` or `-compose-policy off` — and restart the agent session.
+All other policy rules still apply. After editing, run `towline refresh` in the project (or `towline refresh <name>`) — it renders the policy into the MCP configs as `-allow-bind-mounts /srv/app,.`, `-allow-networks proxy`, `-allow-volumes legacy_data` or `-compose-policy off` — and restart the agent session.
 
 As a server-side backstop, you can also restrict non-admin users in Portainer's environment security settings (e.g. disable bind mounts and privileged mode for regular users) — project users are non-admins, so those settings apply to them.
 
@@ -225,6 +229,8 @@ If you use Caddy, start `towline-mcp` with the `-caddy-api` flag pointing to you
 ```
 
 Routes are managed via Caddy's admin API. TLS is handled automatically by Caddy.
+
+Routes dial `<service>.<stack>.towline:<port>`, a network alias that `towline_domains_add` adds to the service on each of its networks (redeploying the stack when it was missing). Dialing the bare service name would let Docker DNS on Caddy's shared network resolve to another project's container with the same service name. Caddy must share a network with the service. Routes created by older versions still dial the bare service name; remove and re-add them to switch.
 
 Because a Caddy instance is usually shared between projects, routes are namespaced per stack with IDs of the form `towline:<stack>:<service>:<domain>`. A project only sees and removes its own routes, the service must exist in the stack's compose file, and a hostname already routed by any other route cannot be claimed. Routes created by older Towline versions (IDs `towline-<service>-<domain>`) are no longer listed or managed — remove them manually via Caddy's admin API.
 
@@ -356,13 +362,13 @@ The diff between deployments often points directly at the problem.
 
 ### Setting up prod
 
-Create a project with both tiers:
+Create a prod-tier project (stack `my-app-prod`):
 
 ```bash
-towline init my-app --with-prod
+towline init --tier prod my-app
 ```
 
-Or promote an existing dev project later (coming in Phase 3):
+Each project has a single tier. Promoting an existing dev project to prod is coming in Phase 3:
 
 ```bash
 towline promote my-app  # not yet implemented
@@ -397,6 +403,7 @@ towline approvals serve
 
 ```bash
 towline approvals list
+towline approvals show <id>
 towline approvals approve <id>
 towline approvals reject <id>
 ```
@@ -410,7 +417,7 @@ These prompt for the approver token on stdin. It is deliberately not read from a
 | `--mode human\|agent` | Approval mode (prompted if omitted) |
 | `--listen <addr>` | Listen address for the built-in server (default `127.0.0.1:8787`). A warning is printed when it listens beyond localhost — put it behind an HTTPS reverse proxy. `approvals serve --listen` overrides it for one run. |
 | `--ntfy <topic URL>` | Send a push notification per request, e.g. `https://ntfy.sh/<private-topic>` |
-| `--public-url <url>` | Where you open the UI, used for the link in notifications |
+| `--public-url <url>` | Where you open the UI: used for the link in notifications, and needed for UI login behind a reverse proxy |
 | `--url <url>` | Use an external approval server instead of the built-in one |
 | `--webhook-token <token>` | Bearer token for the approval server (generated if empty) |
 
@@ -445,7 +452,7 @@ When the agent calls a gated tool, the first call returns `Production operation 
 
 When the agent tries to perform a gated operation:
 
-1. `towline-mcp` sends the request to the approval server and returns `Production operation requires human approval` with an `approvalToken` (the request ID)
+1. `towline-mcp` sends the request to the approval server and returns `Production operation requires human approval` with an `approvalToken` and the short request ID you'll see in the UI
 2. The agent tells you what it wants to do and waits
 3. You approve (or reject) it — in the web UI, with `towline approvals approve <id>`, or via the ntfy notification link
 4. The agent re-calls the tool with identical arguments plus the `approvalToken`
@@ -524,7 +531,7 @@ volumes:
   minio_data:
 ```
 
-Use it: `towline init my-ml-project --template ml-pipeline`
+Use it: `towline init --template ml-pipeline my-ml-project`
 
 ### Creating template packs
 
@@ -567,7 +574,7 @@ Add your compose file and skill files in the same directory:
 └── my-custom-ops.md
 ```
 
-Use it: `towline init my-project --template my-pack`
+Use it: `towline init --template my-pack my-project`
 
 The pack's skills are copied alongside the base DevOps skill. The pack's MCP configs are merged into the generated MCP config files (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`). Pack MCP servers start automatically with your privileges whenever the agent starts, so only use servers from verified publishers, pinned to an exact version.
 
@@ -625,7 +632,7 @@ The generic configuration is in `towline.json` at the project root. It contains 
 Command: towline-mcp
 Args: -server <url> -stack <stack-name> -tier <tier> [-skip-tls-verify]
       [-approval-mode human|agent] [-approval-webhook <url>]
-      [-compose-policy off] [-allow-bind-mounts <path,...>]
+      [-compose-policy off] [-allow-bind-mounts <path,...>] [-allow-networks <name,...>] [-allow-volumes <name,...>]
 Env:  TOWLINE_PORTAINER_TOKEN=<token>
       [TOWLINE_APPROVAL_WEBHOOK_TOKEN=<webhook token>]
 ```
@@ -651,7 +658,7 @@ For each project:
 - **Claude Code permissions** — makes sure `.claude/settings.json` allows `mcp__towline-<tier>`, keeping your other settings.
 - **File hygiene** — sets token-bearing files to `0600` and their directories to `0700`, and adds missing entries to `.gitignore`. If those files are already tracked by git, it warns you: untrack them with `git rm --cached <file>`, and if the repository was ever pushed, revoke the token in Portainer.
 - **Team role** — moves the project team to Portainer's Standard user role, after checking that the team is named `team-<stack>`. Use `--keep-role` to skip this.
-- **Compose policy** — on the first refresh, reads the deployed compose file and allows the bind mounts it already uses in `compose_policy.allow_bind_mounts` (absolute host paths; `"."` for relative ones), so the stack keeps deploying. Host-control paths are never allowed automatically: `/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`. Any remaining policy violations are printed with how to resolve them (remove them from the stack, or edit `compose_policy` yourself and refresh again).
+- **Compose policy** — on the first refresh, reads the deployed compose file and allows the bind mounts it already uses in `compose_policy.allow_bind_mounts` (absolute host paths; `"."` for relative ones), so the stack keeps deploying. Host-control paths are never allowed automatically: `/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`. External networks the deployed stack already joins are allowed in `compose_policy.allow_networks` (except `host`, `bridge` and `none`), and its external or named volumes in `compose_policy.allow_volumes`; this also runs once for projects whose `compose_policy` predates `allow_networks` or `allow_volumes`. Any remaining policy violations are printed with how to resolve them (remove them from the stack, or edit `compose_policy` yourself and refresh again).
 
 Restart your agent sessions afterwards so they load the new MCP configuration.
 
@@ -696,7 +703,7 @@ approval:
 | `towline refresh [--all \| <name>...] [--keep-role]` | Bring existing projects up to date with this release. See [Upgrading](#upgrading). |
 | `towline approvals setup` | Choose human or agent approval for prod operations. |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`). |
-| `towline approvals list \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
+| `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
 | `towline update [--check] [--force]` | Update Towline to the latest release. |
 | `towline promote <name>` | Create prod tier from dev. *(Coming soon)* |
 | `towline rotate-keys <name>` | Rotate API keys. *(Coming soon)* |
@@ -708,7 +715,8 @@ approval:
 |------|---------|-------------|
 | `--tier` | `dev` | Deployment tier: `dev` or `prod` |
 | `--template` | `default` | Compose template or pack name |
-| `--with-prod` | `false` | Also create a prod stack |
+
+Flags go before the project name (`towline init --tier prod my-app`); flags after it are rejected.
 
 ### towline destroy flags
 
