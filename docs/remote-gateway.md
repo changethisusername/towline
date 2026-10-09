@@ -27,7 +27,7 @@ Claude and ChatGPT call `/mcp`, `/p/*`, `/.well-known/*` and `/oauth/*` from the
 
 - Turn **Bot Fight Mode** off for the zone. On the free plan, skip rules can't bypass it.
 - If you use "I'm Under Attack" or strict WAF rules, add a skip rule for those paths.
-- Don't put Cloudflare Access in front of those paths. You can put Access in front of `/ui` for an extra login factor.
+- Don't put Cloudflare Access in front of those paths. You can put Access in front of the two pages you open in your own browser, `/ui` and `/oauth/authorize`, for an extra login factor. Leave `/mcp`, `/p/*`, `/.well-known/*`, `/oauth/register`, `/oauth/token` and `/oauth/revoke` open: apps call them from their servers, and the gateway authenticates every one of them itself.
 
 Cloudflare ends a request that gets no answer within 100 seconds. A tool call that takes longer, such as a deploy that pulls large images, answers "still running" after 80 seconds and finishes in the background; the app can check the result with `towline_deployments`.
 
@@ -48,6 +48,8 @@ This:
 - reads each project's `towline.json` (its scoped Portainer key, stack, tier and compose policy),
 - generates an **owner token** and prints it once (keep it in your password manager),
 - deploys a `towline-gateway` stack through Portainer: the gateway and `cloudflared`. The configuration and tunnel token go in as stack environment variables, never in the compose file.
+
+Already run a reverse proxy with TLS? `--no-tunnel --port 8080` skips `cloudflared` and publishes the gateway on that host port instead; point your proxy at it and keep the same path rules as above.
 
 Don't use Portainer? `--compose-dir ./gateway` writes `docker-compose.yml` and a private `.env` instead; run `docker compose up -d` there.
 
@@ -93,6 +95,8 @@ towline remote remove blog     # stop serving a project (redeploys)
 towline remote deploy          # redeploy, e.g. after changing a project's key or compose_policy
 towline remote owner-token     # issue a new owner token (redeploys)
 ```
+
+The gateway image follows your CLI version. After `towline update`, run `towline remote deploy` to move the gateway to the new release.
 
 Connections and OAuth grants live in the gateway's `gateway-data` volume and survive redeploys. Pending approvals, open sign-in windows and page logins don't survive a restart; the app asks again. Revoking a connection on the page ends its access immediately. Removing a project from the gateway also removes it from every connection, and adding it back later doesn't restore that access.
 

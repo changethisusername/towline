@@ -47,6 +47,11 @@ export default function AgentDocs() {
           (<code>default</code>, <code>web-app</code>, <code>api</code>, and the <code>ai-stack</code> and <code>n8n</code> packs,
           or your own).</li>
         </ol>
+        <p>
+          The CLI also ships an approval server for prod (<code>towline approvals serve</code>), and towline-mcp has a
+          gateway mode that serves projects remotely to apps with no terminal (see{" "}
+          <a href="#remote-gateway">Connected Through the Remote Gateway</a>).
+        </p>
 
         <h2 id="how-it-works">How Your MCP Session Works</h2>
         <p>
@@ -331,6 +336,36 @@ towline-mcp \\
           not counting the compose file) are refused.
         </p>
 
+        <h2 id="remote-gateway">Connected Through the Remote Gateway</h2>
+        <p>
+          If you reach Towline as a connector (Claude, ChatGPT/Codex or another app, at a URL such as{" "}
+          <code>https://mcp.example.com/mcp</code>), you are talking to the human&apos;s self-hosted Towline gateway, not a
+          local <code>towline-mcp</code> process. The same stack scoping, compose policy and container checks apply, with
+          these differences:
+        </p>
+        <ul>
+          <li><strong>Call <code>towline_guide</code> first.</strong> It lists the projects you can use, each project&apos;s
+          tier, your access (read or deploy) and approval policy, and includes the operations guide, since you can&apos;t
+          read <code>CLAUDE.md</code> or skills from disk.</li>
+          <li><strong>Tool names.</strong> On <code>/mcp</code>, tools are named <code>&lt;project&gt;__&lt;tool&gt;</code>
+          (e.g. <code>shop-prod__towline_service_health</code>); use the tools of the project you are working on. On{" "}
+          <code>/p/&lt;project&gt;/mcp</code> they have their plain names.</li>
+          <li><strong>No shell or files.</strong> Pass complete compose files inline and deploy images that already exist in a
+          registry.</li>
+          <li><strong>Read-only connections</strong> don&apos;t see tools that change anything. If a call is refused because
+          the client only has read access, ask the human for a connection with deploy access instead of looking for another
+          route.</li>
+          <li><strong>Approvals.</strong> By default every change (deploy, configuration, exec, destructive action) needs the
+          human&apos;s approval on the gateway page, on dev projects too. The first call runs nothing and returns an{" "}
+          <code>approvalToken</code>. Tell the human what the change does and that it is waiting on the gateway page, wait
+          until they say they decided, then re-call with identical arguments plus the token. You can never confirm your own
+          changes through the gateway, and a &quot;yes&quot; in the chat approves nothing. Tokens are bound to your
+          connection, the tool and the exact arguments.</li>
+          <li><strong>Slow calls.</strong> A call that takes longer than 80 seconds (for example a deploy pulling large
+          images) answers that it is still running and finishes in the background. Check the outcome with{" "}
+          <code>towline_deployments</code> and <code>towline_service_health</code> rather than calling it again.</li>
+        </ul>
+
         <h2 id="common-workflows">Common Agent Workflows</h2>
 
         <h3>Deploy a new service</h3>
@@ -426,6 +461,22 @@ towline approvals reject <id>`}</code></pre>
 towline refresh <name>...      # specific projects (or no argument inside a project)
   --keep-role                  # don't change the team role`}</code></pre>
 
+        <h3><code>towline remote</code></h3>
+        <p>
+          Configures and deploys the remote gateway that serves projects to connector apps. Only the human should run
+          these; the owner token printed by <code>setup</code> and <code>owner-token</code> is the human&apos;s, and you
+          should never ask for it.
+        </p>
+        <pre><code>{`TUNNEL_TOKEN=<cloudflare-tunnel-token> \\
+towline remote setup --url https://mcp.example.com --all   # or name projects
+  [--approval always|prod] [--ntfy-url url] [--portainer-url url]
+  [--no-tunnel --port 8080] [--compose-dir dir]
+towline remote add <name>...       # serve more projects (redeploys)
+towline remote remove <name>...    # stop serving projects (redeploys)
+towline remote deploy              # redeploy, e.g. after towline update
+towline remote status              # configuration and health check
+towline remote owner-token         # new owner token for the /ui page`}</code></pre>
+
         <h3>Not yet implemented</h3>
         <p>
           <code>towline promote</code>, <code>towline rotate-keys</code> and <code>towline status</code> exist as commands but
@@ -500,6 +551,7 @@ dockerProxy method=POST dockerAPIPath=/containers/<id>/restart
           <li><a href="https://github.com/changethisusername/towline" target="_blank" rel="noopener noreferrer">GitHub Repository</a></li>
           <li><a href="https://github.com/changethisusername/towline/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer">Getting Started Guide</a></li>
           <li><a href="https://github.com/changethisusername/towline/blob/main/docs/user-guide.md" target="_blank" rel="noopener noreferrer">User Guide</a></li>
+          <li><a href="https://github.com/changethisusername/towline/blob/main/docs/remote-gateway.md" target="_blank" rel="noopener noreferrer">Remote Gateway Guide</a></li>
           <li><a href="https://portainer.io" target="_blank" rel="noopener noreferrer">Portainer</a></li>
         </ul>
 

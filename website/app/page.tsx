@@ -27,17 +27,24 @@ export default function Home() {
           An open-source toolkit that lets AI coding agents (Claude Code, Cursor, Codex, etc.)
           deploy and operate Docker containers on{" "}
           <a href="https://portainer.io" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text transition-colors">Portainer</a>-managed infrastructure.
-          It consists of four parts:
+          It consists of five parts:
         </p>
         <ol className="mt-3 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-decimal pl-5">
           <li><strong className="text-text">towline CLI</strong> — scaffolds a new project: creates a Portainer team, scoped API key, container stack, agent config, compose files, and git repo.</li>
           <li><strong className="text-text">towline-mcp</strong> — an MCP server (Go binary) that runs per-project, giving the agent 10 operational tools (health, logs, env vars, domains, scale, exec) plus upstream Portainer stack CRUD and Docker proxy, all scoped to a single stack.</li>
           <li><strong className="text-text">DevOps skill</strong> — a markdown file (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">skills/towline-devops.md</code>) installed into every project that teaches the agent how to use the tools: deployment workflows, debugging patterns, rollback procedures, and the tier/approval model.</li>
           <li><strong className="text-text">Template packs</strong> — bundles of compose files, domain-specific agent skills, and additional MCP configs. The <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">ai-stack</code> pack ships Ollama + Open WebUI with an AI operations skill; the <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">n8n</code> pack ships n8n + PostgreSQL with a workflow operations skill. Compose templates (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">api</code>, <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">web-app</code>) are also available without pack-level skills.</li>
+          <li><strong className="text-text">Remote gateway</strong> — serves your projects as a connector to apps with no terminal (Claude on the web, desktop or phone, ChatGPT/Codex), on your own domain through a Cloudflare Tunnel, with every change waiting for your approval.</li>
         </ol>
 
+        <p className="mt-4 text-[13px] text-text-muted">
+          New in v0.5.0: the{" "}
+          <a href="#remote" className="underline underline-offset-2 hover:text-text-secondary transition-colors">remote gateway</a>.{" "}
+          <a href={`${REPO}/releases`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text-secondary transition-colors">Release notes</a>
+        </p>
+
         {/* Install */}
-        <div className="mt-8 rounded-md border border-border bg-code-bg px-4 py-3">
+        <div className="mt-6 rounded-md border border-border bg-code-bg px-4 py-3">
           <code className="text-[13px] text-text-secondary">
             <span className="select-none text-text-muted">$ </span>
             <span className="text-text">curl -fsSL towline.dev/install | sh</span>
@@ -94,6 +101,30 @@ export default function Home() {
           (privileged mode, host bind mounts, host networking, external volumes and networks, and more).
           You can allow specific bind mounts, networks and volumes per project in{" "}
           <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">towline.json</code>; the agent can&apos;t.
+        </p>
+
+        {/* Remote gateway */}
+        <h2 id="remote" className="mt-10 text-[15px] font-semibold text-text">Use it from Claude or ChatGPT</h2>
+        <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">
+          The remote gateway lets apps that have no terminal work on your projects as a connector. It runs as one
+          stack next to Portainer and is published on your own domain through a Cloudflare Tunnel, so it works behind
+          NAT with no port forwarding.
+        </p>
+        <div className="mt-3 rounded-md border border-border bg-code-bg px-4 py-3.5">
+          <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`export TUNNEL_TOKEN=<cloudflare tunnel token>
+towline remote setup --url https://mcp.example.com --all`}</code></pre>
+        </div>
+        <ol className="mt-3 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-decimal pl-5">
+          <li>Open <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">https://mcp.example.com/ui</code> and sign in with the owner token that setup printed.</li>
+          <li>Create a connection: pick the projects and <strong className="text-text">Read only</strong> or <strong className="text-text">Deploy</strong> access. Apps like Claude and ChatGPT sign in with OAuth; Claude Code and Cursor get a header token.</li>
+          <li>Add <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">https://mcp.example.com/mcp</code> as a connector in the app.</li>
+        </ol>
+        <p className="mt-3 text-[14px] leading-relaxed text-text-secondary">
+          Every deploy, configuration change or exec made through the gateway waits for your approval on that page,
+          on dev projects too (<code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">--approval prod</code> limits it to prod). The gateway holds each project&apos;s
+          own scoped key, never the admin key. Cloudflare Access can sit in front of{" "}
+          <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">/ui</code> and <code className="text-[12px] bg-code-bg border border-border px-1 py-0.5 rounded">/oauth/authorize</code>; apps call the other paths from their servers.{" "}
+          <a href={`${REPO}/blob/main/docs/remote-gateway.md`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text transition-colors">Remote gateway guide</a>
         </p>
 
         {/* Step by step */}
@@ -160,6 +191,7 @@ export default function Home() {
           <pre className="text-[13px] leading-7 text-text-secondary overflow-x-auto"><code>{`towline list                 # see all projects
 towline refresh --all        # upgrade existing projects after towline update
 towline approvals serve      # approval server for prod (web UI at /ui)
+towline remote status        # remote gateway health
 towline destroy my-app       # remove Portainer stack, user and team`}</code></pre>
         </div>
         <p className="mt-2 text-[13px] text-text-muted">
@@ -173,7 +205,8 @@ towline destroy my-app       # remove Portainer stack, user and team`}</code></p
         <ul className="mt-2 space-y-1.5 text-[14px] leading-relaxed text-text-secondary list-disc pl-5">
           <li>Portainer v2.28+ with API access (self-hosted or Portainer Cloud)</li>
           <li>Docker on the container host</li>
-          <li>An MCP-compatible agent (Claude Code, Cursor, Codex, Gemini CLI, Windsurf)</li>
+          <li>An MCP-compatible agent (Claude Code, Cursor, Codex, Gemini CLI, Windsurf), or, through the remote gateway, an app that takes connectors (Claude, ChatGPT/Codex)</li>
+          <li>For the remote gateway: a domain on Cloudflare (the free plan is enough)</li>
         </ul>
 
         {/* Links */}
@@ -186,6 +219,12 @@ towline destroy my-app       # remove Portainer stack, user and team`}</code></p
           </a>
           <a href={`${REPO}/blob/main/docs/user-guide.md`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text-secondary transition-colors">
             User guide
+          </a>
+          <a href={`${REPO}/blob/main/docs/remote-gateway.md`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text-secondary transition-colors">
+            Remote gateway
+          </a>
+          <a href={`${REPO}/releases`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text-secondary transition-colors">
+            Releases
           </a>
           <a href={REPO} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-text-secondary transition-colors">
             Source code

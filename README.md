@@ -216,7 +216,7 @@ If no mode is set (configs from earlier releases, or `towline-mcp` run without `
 
 ## Remote gateway (Claude, ChatGPT/Codex connectors)
 
-Use your projects from apps that have no terminal. `towline remote setup --url https://mcp.example.com --tunnel-token <cloudflare-tunnel-token> --all` deploys a gateway and a Cloudflare Tunnel as a Portainer stack, so it works behind NAT or double NAT with no port forwarding. On the gateway's web page you create connections scoped to specific projects with read or deploy access, add `https://mcp.example.com/mcp` as a connector in the app, and approve changes as they come in. See [docs/remote-gateway.md](docs/remote-gateway.md).
+Use your projects from apps that have no terminal. `TUNNEL_TOKEN=<cloudflare-tunnel-token> towline remote setup --url https://mcp.example.com --all` deploys a gateway and a Cloudflare Tunnel as a Portainer stack, so it works behind NAT or double NAT with no port forwarding. On the gateway's web page you create connections scoped to specific projects with read or deploy access, add `https://mcp.example.com/mcp` as a connector in the app, and approve changes as they come in. Apps sign in with OAuth; Claude Code and Cursor use a header token. Every change made through the gateway waits for your approval on that page by default, on dev projects too, and the gateway holds only each project's own team-scoped key, never the admin key. See [docs/remote-gateway.md](docs/remote-gateway.md).
 
 ## Domain routing
 
@@ -287,6 +287,9 @@ The pack's skills are copied into the project alongside the base DevOps skill. M
 | `towline approvals setup` | Choose human or agent approval for prod operations |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`) |
 | `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token) |
+| `towline remote setup --url <url> [--all \| <name>...]` | Deploy the remote gateway for Claude, ChatGPT/Codex and other connector apps (see [docs/remote-gateway.md](docs/remote-gateway.md)) |
+| `towline remote add \| remove <name>...` | Serve another project remotely, or stop serving one (redeploys) |
+| `towline remote deploy \| status \| owner-token` | Redeploy the gateway, check its health, or issue a new owner token |
 | `towline update` | Update Towline to the latest release |
 | `towline promote <name>` | Add prod tier *(coming soon)* |
 | `towline rotate-keys <name>` | Rotate API credentials *(coming soon)* |
@@ -358,6 +361,8 @@ Existing projects keep working without `refresh` (legacy `-token` flag, agent-co
 - moves the project team to the Standard user role (looked up by name), after checking the team is `team-<stack>`, then reads the role back and prints it; warns if the role can't update stacks (`--keep-role` only reports the current role)
 - on first run, allows the deployed stack's existing external networks in `compose_policy.allow_networks` (except `host`/`bridge`/`none`), its external or named volumes in `compose_policy.allow_volumes`, and its existing bind mounts in `compose_policy.allow_bind_mounts` — except host-control paths (`/`, `docker.sock`, `/var/lib/docker`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/home`) — and prints any remaining policy violations and how to resolve them
 
+If you used v0.4.0, `refresh` is also what fixes its team-role bug: v0.4.0 gave project teams Portainer's Read-only user role, so deploys failed with HTTP 403. If you serve projects through the remote gateway, run `towline remote deploy` after updating so the gateway moves to the new release.
+
 Restart your agent sessions afterwards. `tools.yaml` / `towline-tools.yaml` in project directories are upgraded automatically by `towline-mcp` when older than the embedded version (the old copy is kept as `.bak`).
 
 ---
@@ -391,7 +396,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for project structure and development wor
 
 ## Roadmap
 
-**Now**: Portainer deployment with three-layer permissions, 10 MCP tools, template packs with skills and MCP configs.
+**Now**: Portainer deployment with three-layer permissions, 10 MCP tools, template packs with skills and MCP configs, a built-in approval server, and a self-hosted remote gateway for connector apps.
 
 **Next**: `towline promote` (dev-to-prod workflow), `towline rotate-keys`, `towline status`, more approval integrations (e.g. Telegram).
 
