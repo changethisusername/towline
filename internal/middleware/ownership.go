@@ -138,6 +138,21 @@ func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q rejected: %v", rawPath, err)), nil
 			}
 
+			if isReadMethod(method) {
+				query := map[string]string{}
+				items, _ := parser.GetArrayOfObjects("queryParams", false)
+				for _, it := range items {
+					if kv, ok := it.(map[string]any); ok {
+						k, _ := kv["key"].(string)
+						v, _ := kv["value"].(string)
+						query[k] = v
+					}
+				}
+				if isStreamingDockerRead(path, query) {
+					return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q streams without end; use towline_service_logs or pass stream=false / follow=false", rawPath)), nil
+				}
+			}
+
 			// Mutations are limited to lifecycle actions on the stack's own
 			// containers; everything else (container create, exec, networks,
 			// volumes, images, system, ...) can reach outside the stack.

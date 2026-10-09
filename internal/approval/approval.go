@@ -23,6 +23,9 @@ type PendingApproval struct {
 	// the real one (e.g. after the server restarts and forgets it).
 	RequestID string
 	ToolName  string
+	// Caller is the remote client the token was issued to ("" for the
+	// local stdio agent). A token only works for the caller it was issued to.
+	Caller    string
 	Args      map[string]any
 	ArgsHash  string
 	CreatedAt time.Time
@@ -45,11 +48,17 @@ func NewStore() *Store {
 }
 
 func (s *Store) Request(toolName string, args map[string]any) string {
+	return s.RequestFor(toolName, "", args)
+}
+
+// RequestFor is Request for a token that only the given caller may use.
+func (s *Store) RequestFor(toolName, caller string, args map[string]any) string {
 	token := generateToken()
 	s.mu.Lock()
 	s.pending[token] = &PendingApproval{
 		RequestID: generateToken(),
 		ToolName:  toolName,
+		Caller:    caller,
 		Args:      args,
 		ArgsHash:  hashArgs(args),
 		CreatedAt: time.Now(),

@@ -19,7 +19,7 @@ func Run(args []string) error {
 
 func run(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: towline <command> [args]\nCommands: setup, init, list, destroy, promote, rotate-keys, status, update, approvals, refresh")
+		return fmt.Errorf("usage: towline <command> [args]\nCommands: setup, init, list, destroy, promote, rotate-keys, status, update, approvals, refresh, remote")
 	}
 
 	switch args[0] {
@@ -43,6 +43,8 @@ func run(args []string) error {
 		return runApprovals(args[1:])
 	case "refresh":
 		return runRefresh(args[1:])
+	case "remote":
+		return runRemote(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}

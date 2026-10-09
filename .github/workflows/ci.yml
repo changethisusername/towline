@@ -24,3 +24,15 @@ jobs:
 
       - name: Test
         run: go test -v -race ./internal/... ./pkg/... ./tests/...
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the gateway image
+        run: docker build -t towline-mcp:ci .
+
+      - name: Smoke test the image
+        run: |
+          docker run --rm --entrypoint /towline-mcp towline-mcp:ci gateway -h 2>&1 | grep -q -- -config

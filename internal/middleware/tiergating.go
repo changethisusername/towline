@@ -52,6 +52,9 @@ type ApprovalGate struct {
 	Store    *approval.Store
 	Approver approval.Approver
 	Project  string
+	// ApprovalURL, when set, is the page where the human approves (the
+	// remote gateway), included in the message so chat apps show a link.
+	ApprovalURL string
 }
 
 // NewTierGating returns a middleware that gates tool calls based on tier.
@@ -115,6 +118,10 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 				gate.Store.Release(token)
 				return mcp.NewToolResultError(fmt.Sprintf("Approval token was issued for %q, not %q. Request a new token for this tool.", pending.ToolName, toolName)), nil
 			}
+			if pending.Caller != callerID(ctx) {
+				gate.Store.Release(token)
+				return mcp.NewToolResultError("Approval token was issued to a different client. Request a new one by calling this tool without the approvalToken parameter."), nil
+			}
 
 			status, err := gate.Approver.Status(ctx, pending.RequestID)
 			if err != nil {
@@ -127,7 +134,11 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 				return next(ctx, request)
 			case approval.StatusRejected:
 				gate.Store.Consume(token)
-				return mcp.NewToolResultError(fmt.Sprintf("Production operation %q was rejected by a human approver. Do not retry without discussing it with your partner.", toolName)), nil
+				what := "Production operation"
+				if gate.ApprovalURL != "" {
+					what = "Operation" // remote gateway: dev projects are gated too
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("%s %q was rejected by a human approver. Do not retry without discussing it with your partner.", what, toolName)), nil
 			default:
 				gate.Store.Release(token)
 				return mcp.NewToolResultText(fmt.Sprintf(
@@ -145,7 +156,7 @@ func agentConfirm(ctx context.Context, gate *ApprovalGate, toolName string, requ
 	token, _ := toolgen.NewParameterParser(request).GetString("approvalToken", false)
 
 	if token == "" {
-		newToken := gate.Store.Request(toolName, args)
+		newToken := gate.Store.RequestFor(toolName, callerID(ctx), args)
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"Production operation requires confirmation.\nAction: %s\nReview what this change does to production. To confirm, re-call this tool with identical arguments plus approvalToken: %q",
 			toolName, newToken)), nil
@@ -158,11 +169,15 @@ func agentConfirm(ctx context.Context, gate *ApprovalGate, toolName string, requ
 	if pending.ToolName != toolName {
 		return mcp.NewToolResultError(fmt.Sprintf("Approval token was issued for %q, not %q. Request a new token for this tool.", pending.ToolName, toolName)), nil
 	}
+	if pending.Caller != callerID(ctx) {
+		return mcp.NewToolResultError("Approval token was issued to a different client. Request a new one by calling this tool without the approvalToken parameter."), nil
+	}
 	return next(ctx, request)
 }
 
 func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, args map[string]any) (*mcp.CallToolResult, error) {
-	token := gate.Store.Request(toolName, args)
+	caller := callerID(ctx)
+	token := gate.Store.RequestFor(toolName, caller, args)
 	pending := gate.Store.Peek(token, args)
 	if pending == nil {
 		return mcp.NewToolResultError("failed to record approval request"), nil
@@ -178,6 +193,7 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		Project:     gate.Project,
 		Action:      toolName,
 		Description: description,
+		Client:      caller,
 	}
 	if file, ok := args["file"].(string); ok {
 		req.StackContent = file
@@ -192,6 +208,12 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		"Production operation requires human approval.\nAction: %s\nAn approval request has been sent (shown to your partner as %s). Tell your partner what this change does and wait for them to approve it. Then re-call this tool with identical arguments plus approvalToken: %q",
 		toolName, shortRequestID(pending.RequestID), token,
 	)
+	if gate.ApprovalURL != "" {
+		msg = fmt.Sprintf(
+			"This change needs your partner's approval.\nAction: %s\nAn approval request has been sent (shown as %s). Tell your partner what this change does and ask them to approve it at %s. Saying yes in the chat approves nothing. Once they have approved, re-call this tool with identical arguments plus approvalToken: %q",
+			toolName, shortRequestID(pending.RequestID), gate.ApprovalURL, token,
+		)
+	}
 	return mcp.NewToolResultText(msg), nil
 }
 

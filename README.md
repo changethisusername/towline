@@ -213,6 +213,11 @@ If no mode is set (configs from earlier releases, or `towline-mcp` run without `
 
 ---
 
+
+## Remote gateway (Claude, ChatGPT/Codex connectors)
+
+Use your projects from apps that have no terminal. `towline remote setup --url https://mcp.example.com --tunnel-token <cloudflare-tunnel-token> --all` deploys a gateway and a Cloudflare Tunnel as a Portainer stack, so it works behind NAT or double NAT with no port forwarding. On the gateway's web page you create connections scoped to specific projects with read or deploy access, add `https://mcp.example.com/mcp` as a connector in the app, and approve changes as they come in. See [docs/remote-gateway.md](docs/remote-gateway.md).
+
 ## Domain routing
 
 Three proxy backends, auto-detected or explicit:
