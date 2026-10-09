@@ -12,6 +12,7 @@ This guide covers day-to-day usage of Towline — how to work with your agent to
 - [Deployment history and rollbacks](#deployment-history-and-rollbacks)
 - [Debugging and diagnostics](#debugging-and-diagnostics)
 - [Production tier](#production-tier)
+- [Remote gateway](#remote-gateway)
 - [Templates and customization](#templates-and-customization)
 - [Multiple agents and editors](#multiple-agents-and-editors)
 - [Upgrading](#upgrading)
@@ -481,6 +482,27 @@ In both modes, approval tokens are single-use, bound to the tool name and exact 
 
 ---
 
+## Remote gateway
+
+The remote gateway lets apps with no terminal, such as Claude (web, desktop, mobile) and ChatGPT/Codex, use your projects as a connector. It runs as a `towline-gateway` stack next to Portainer, published on your own domain through a Cloudflare Tunnel, so it works behind NAT with no port forwarding.
+
+```bash
+export TUNNEL_TOKEN=<cloudflare tunnel token>
+towline remote setup --url https://mcp.example.com --all   # or name projects: shop blog
+```
+
+`setup` prints an owner token once. Then:
+
+1. Open `https://mcp.example.com/ui` and sign in with the owner token.
+2. Under **Connect an app**, pick the projects, **Read only** or **Deploy** access, and how the app connects: app sign-in (OAuth, for Claude and ChatGPT), a client ID and secret, or a header token (Claude Code, Cursor).
+3. Add `https://mcp.example.com/mcp` as a connector in the app. `/p/<project>/mcp` serves a single project with plain tool names.
+
+Changes made through the gateway (deploys, configuration, exec, destructive actions) wait for your approval under **Waiting for your approval** on the same page, on dev projects too unless you pass `--approval prod`. The gateway holds each project's own team-scoped key, never the admin key. You can put Cloudflare Access in front of `/ui` and `/oauth/authorize` only; apps call the other paths from their servers.
+
+Cloudflare settings, the three connection methods, URLs and the security model are in [remote-gateway.md](remote-gateway.md).
+
+---
+
 ## Templates and customization
 
 ### Bundled templates
@@ -648,6 +670,8 @@ towline update             # installs the latest release, then reminds you to re
 towline refresh --all      # bring every project in the projects directory up to date
 ```
 
+If you serve projects through the [remote gateway](#remote-gateway), also run `towline remote deploy`: the gateway image follows the CLI version.
+
 You can also refresh specific projects (`towline refresh my-app other-app`) or run plain `towline refresh` inside a project directory.
 
 ### What refresh does
@@ -704,6 +728,11 @@ approval:
 | `towline approvals setup` | Choose human or agent approval for prod operations. |
 | `towline approvals serve` | Run the built-in approval server (web UI at `/ui`). |
 | `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
+| `towline remote setup --url <url> [--all \| <name>...]` | Deploy the remote gateway. See [Remote gateway](#remote-gateway). |
+| `towline remote add \| remove <name>...` | Serve another project remotely, or stop serving one (redeploys). |
+| `towline remote deploy` | Redeploy the gateway, e.g. after `towline update` or a change to a project's key or `compose_policy`. |
+| `towline remote status` | Show the gateway configuration and check its health. |
+| `towline remote owner-token` | Issue a new owner token for the gateway page (redeploys). |
 | `towline update [--check] [--force]` | Update Towline to the latest release. |
 | `towline promote <name>` | Create prod tier from dev. *(Coming soon)* |
 | `towline rotate-keys <name>` | Rotate API keys. *(Coming soon)* |

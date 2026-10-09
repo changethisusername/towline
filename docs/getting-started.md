@@ -204,6 +204,17 @@ If you use Traefik as your reverse proxy (common in homelabs), the agent can man
 
 Towline detects Traefik from your compose labels and adds the correct routing configuration automatically. Caddy and Cloudflare Tunnels are also supported.
 
+### Use your projects from Claude or ChatGPT
+
+The remote gateway serves your projects as a connector to apps with no terminal (Claude on the web, desktop or phone, ChatGPT/Codex), through a Cloudflare Tunnel on your own domain:
+
+```bash
+export TUNNEL_TOKEN=<cloudflare tunnel token>
+towline remote setup --url https://mcp.example.com --all
+```
+
+Sign in at `https://mcp.example.com/ui` with the owner token it prints, create a connection with read or deploy access to the projects you choose, and add `https://mcp.example.com/mcp` as a connector in the app. Changes wait for your approval on that page. See [remote-gateway.md](remote-gateway.md).
+
 ### Customize templates
 
 Copy the bundled templates to override them:
@@ -232,7 +243,7 @@ After `towline update`, bring existing projects up to date:
 towline refresh --all        # or: towline refresh my-app  (or plain `towline refresh` inside a project)
 ```
 
-This updates each project's MCP configs (keeping your other MCP servers and custom flags), moves the token into an env var, applies your approval mode and compose policy, fixes file permissions and `.gitignore`, and moves the project team to the Standard user role (`--keep-role` skips that). Restart your agent sessions afterwards. Projects you don't refresh keep working as before — they just miss the new hardening. See the [User Guide](user-guide.md#upgrading) for details.
+This updates each project's MCP configs (keeping your other MCP servers and custom flags), moves the token into an env var, applies your approval mode and compose policy, fixes file permissions and `.gitignore`, and moves the project team to the Standard user role (`--keep-role` skips that). Restart your agent sessions afterwards. Projects you don't refresh keep working as before — they just miss the new hardening. If you used v0.4.0, refreshing also fixes its team-role bug, which made every deploy fail with HTTP 403. If you serve projects through the remote gateway, run `towline remote deploy` too. See the [User Guide](user-guide.md#upgrading) for details.
 
 ---
 
@@ -257,6 +268,10 @@ Portainer is using a certificate your machine doesn't trust. If it's self-signed
 ### "your ~/.towline/config.yaml predates TLS verification"
 
 Configs from earlier releases have no `skip_tls_verify` key and keep skipping certificate verification, as before. Add `skip_tls_verify: false` to `~/.towline/config.yaml` to verify Portainer's certificate, or `skip_tls_verify: true` to keep skipping and silence the warning (or re-run `towline setup`, which asks). Then run `towline refresh --all`.
+
+### Agent gets HTTP 403 "Permission denied to access environment" on deploy
+
+The project's team has the wrong Portainer role, usually because it was created or refreshed with v0.4.0. Run `towline update && towline refresh <name>`; it should print `Team role set to Standard user`.
 
 ### Agent says a compose file was rejected
 

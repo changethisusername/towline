@@ -91,6 +91,16 @@ Follow the conventions already established in the codebase:
 4. Ensure all existing tests pass (`make test`).
 5. Keep your PR focused — one logical change per PR.
 
+## Releasing
+
+Releases are cut from `main` by the Release workflow, which builds the binaries, publishes the GitHub release and pushes the gateway image to `ghcr.io/changethisusername/towline-mcp`.
+
+1. Make sure the release PR is merged and `main` is green.
+2. Optionally add release notes as `docs/releases/vX.Y.Z.md`; the workflow uses them as the release body.
+3. Start the release in one of two ways:
+   - **From GitHub:** Actions → Release → Run workflow on `main`, with the tag (e.g. `v0.5.1`). The workflow tags the commit it runs on. Tick **replace** only to move a tag and release that already exist.
+   - **From a checkout:** `git tag -a vX.Y.Z -m vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
+
 ## Questions?
 
 Open a GitHub issue if anything is unclear. We are happy to help.
