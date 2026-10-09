@@ -4,16 +4,64 @@ on:
   push:
     tags:
       - "v*"
+  # Release a tag from Actions instead of pushing it: tags the commit the
+  # workflow runs on (normally main). With replace, an existing release
+  # and tag of that name are deleted first.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag, e.g. v0.5.0"
+        required: true
+      replace:
+        description: "Delete an existing release and tag with this name first"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  tag:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A tag pushed with GITHUB_TOKEN doesn't start this workflow again;
+      # the jobs below build it in this run.
+      - name: Tag this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPLACE: ${{ inputs.replace }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag must look like v1.2.3, got '$TAG'" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            if [ "$REPLACE" != "true" ]; then
+              echo "$TAG already exists; run with replace to move it" >&2
+              exit 1
+            fi
+            gh release delete "$TAG" --yes || true
+            git push --delete origin "$TAG"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
+  release:
+    needs: tag
+    if: ${{ !cancelled() && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
@@ -25,8 +73,8 @@ jobs:
       - name: Choose release notes
         id: notes
         run: |
-          if [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
-            echo "args=--release-notes docs/releases/${GITHUB_REF_NAME}.md" >> "$GITHUB_OUTPUT"
+          if [ -f "docs/releases/${TAG}.md" ]; then
+            echo "args=--release-notes docs/releases/${TAG}.md" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run GoReleaser
@@ -36,15 +84,22 @@ jobs:
           args: release --clean ${{ steps.notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
 
   # Gateway image for 'towline remote' (ghcr.io/<owner>/towline-mcp).
   image:
+    needs: tag
+    if: ${{ !cancelled() && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
 
       - uses: docker/setup-qemu-action@v3
 
@@ -60,9 +115,10 @@ jobs:
         id: meta
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/towline-mcp"
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           echo "tags=${image}:${version},${image}:latest" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -72,6 +128,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
-            COMMIT=${{ github.sha }}
+            COMMIT=${{ steps.meta.outputs.commit }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
