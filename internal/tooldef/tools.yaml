@@ -1,5 +1,5 @@
 ---
-version: v1.3
+version: v1.4
 tools:
   ## Access Groups
   ## An access group is the equivalent of an Endpoint Group in Portainer.
@@ -766,7 +766,9 @@ tools:
       In read-only mode, only GET requests are allowed.
       Requests are scoped to this stack's own containers. The only mutating requests allowed are
       POST to a container's start, stop, restart, kill, pause, unpause, wait, resize, rename or update
-      endpoint, and DELETE of a container. Paths must not contain query strings (use queryParams).
+      endpoint, and DELETE of a container. Reads are limited to /containers/json, this stack's containers
+      (json, top, logs, stats, changes, archive), /volumes, /version and /_ping.
+      Paths must not contain query strings (use queryParams).
     parameters:
       - name: environmentId
         description: The ID of the environment to proxy Docker requests to

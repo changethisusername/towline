@@ -98,7 +98,9 @@ call again without approvalToken to get a new one.
   - dockerAPIPath must be a plain path: no query strings, fragments,
     %-encoding, backslashes, or ./.. / empty segments. Put query parameters
     in queryParams. Version prefixes like /v1.43/ are fine.
-  - GET requests work on your stack's containers. The only mutations allowed
+  - Reads are limited to /containers/json, your stack's containers
+    (json, top, logs, stats, changes, archive), /volumes, /version and
+    /_ping. The only mutations allowed
     are POST /containers/{id}/{start|stop|restart|kill|pause|unpause|wait|
     resize|rename|update} and DELETE /containers/{id}, on your own
     containers. Container create, exec, archive upload, and anything on

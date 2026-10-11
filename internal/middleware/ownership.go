@@ -138,6 +138,10 @@ func (o *ContainerOwnership) ForDockerProxy() MiddlewareFunc {
 				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q rejected: %v", rawPath, err)), nil
 			}
 
+			if isReadMethod(method) && !isAllowedRead(path) {
+				return mcp.NewToolResultError(fmt.Sprintf("Docker API path %q is not readable in scoped mode; reads are limited to /containers/json, this stack's containers (json, top, logs, stats, changes, archive), /volumes, /version and /_ping. Use the towline_* tools for anything else", rawPath)), nil
+			}
+
 			if isReadMethod(method) {
 				query := map[string]string{}
 				items, _ := parser.GetArrayOfObjects("queryParams", false)

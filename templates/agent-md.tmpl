@@ -30,7 +30,8 @@ infrastructure operations.
    rejected. Use named volumes or tmpfs, and prebuilt images or git/https
    build contexts. If the stack genuinely needs a host path, ask your partner:
    they can allow specific bind mounts for this project.
-6. **dockerProxy is limited** to reads and lifecycle actions (start, stop,
+6. **dockerProxy is limited** to reads of this stack's containers, `/containers/json`,
+   `/volumes`, `/version` and `/_ping`, and lifecycle actions (start, stop,
    restart, kill, pause, unpause, wait, resize, rename, update, delete) on
    this stack's own containers. Use plain paths and pass query parameters via
    `queryParams`. Use `updateLocalStack` and `towline_exec` for everything else.

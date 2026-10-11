@@ -794,4 +794,6 @@ Flags go before the project name (`towline init --tier prod my-app`); flags afte
 
 In scoped mode, `dockerAPIPath` must be a plain path: query strings, fragments, `%`-encoding, backslashes, and `.`/`..` or empty segments are rejected (pass query parameters via `queryParams`). API version prefixes like `/v1.43/` are normalized before scoping.
 
+Reads are limited to `GET /containers/json` (filtered to the stack), `GET /containers/{id}/{json|top|logs|stats|changes|archive}` on the stack's own containers, `GET /volumes` and `/volumes/{name}` (Portainer filters these), `/version` and `/_ping`. Everything else is refused, including `/system/df`, `/info`, `/images`, `/networks`, `/exec/{id}/json` and the swarm endpoints, because Portainer passes them through unfiltered and they describe other projects on the host.
+
 The only mutating requests allowed are `POST /containers/{id}/{start|stop|restart|kill|pause|unpause|wait|resize|rename|update}` and `DELETE /containers/{id}`, on the stack's own containers. Container create, exec, archive upload, and anything on networks, volumes, images, system, etc. are rejected. In prod, only start/stop/restart are operational; the other allowed mutations need approval.

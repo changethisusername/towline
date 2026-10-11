@@ -50,6 +50,37 @@ func isReadMethod(method string) bool {
 	return method == "GET" || method == "HEAD"
 }
 
+// readableContainerRoute matches the per-container reads an agent may make
+// (ownership is still checked): GET /containers/{id}/{json|top|logs|stats|
+// changes|archive}.
+var readableContainerRoute = regexp.MustCompile(`^/containers/([^/]+)/(json|top|logs|stats|changes|archive)$`)
+
+// readableVolumeRoute matches GET /volumes/{name}. Portainer applies resource
+// control to volumes, so a team key only sees its own.
+var readableVolumeRoute = regexp.MustCompile(`^/volumes/[^/]+$`)
+
+// readableDockerPaths are the collection reads an agent may make. The
+// container list is filtered to the stack; Portainer filters volumes.
+var readableDockerPaths = map[string]bool{
+	"/_ping":           true,
+	"/version":         true,
+	"/containers/json": true,
+	"/volumes":         true,
+}
+
+// isAllowedRead reports whether a read of a normalized path is one the scoped
+// agent may make. Reads are an allow-list because Portainer passes many Docker
+// endpoints through unfiltered for team keys: /system/df lists every
+// container and volume on the host, and /images, /networks/{id}, /exec/{id},
+// /info, /plugins and the swarm endpoints describe other projects too.
+func isAllowedRead(path string) bool {
+	if readableDockerPaths[path] || readableVolumeRoute.MatchString(path) {
+		return true
+	}
+	m := readableContainerRoute.FindStringSubmatch(path)
+	return m != nil && !reservedContainerIDs[m[1]]
+}
+
 // containerActionRoute matches POST /containers/{id}/{action}.
 var containerActionRoute = regexp.MustCompile(`^/containers/([^/]+)/([a-z]+)$`)
 
