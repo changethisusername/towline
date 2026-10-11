@@ -128,7 +128,7 @@ func TestContainerOwnership_NonContainerPath(t *testing.T) {
 
 	result, err := handler(context.Background(), makeRequest(map[string]any{
 		"environmentId": float64(1),
-		"dockerAPIPath": "/images/json",
+		"dockerAPIPath": "/version",
 		"method":        "GET",
 	}))
 	require.NoError(t, err)
@@ -198,12 +198,33 @@ func TestContainerOwnership_BlockedPaths(t *testing.T) {
 		block  bool
 	}{
 		{"/networks/create", "POST", true},
-		{"/networks/abc123", "GET", false}, // GET is allowed
+		{"/networks/abc123", "GET", true}, // inspect lists other projects' containers
 		{"/volumes/create", "POST", true},
 		{"/swarm/init", "POST", true},
 		{"/secrets/create", "POST", true},
 		{"/exec/abc123/start", "POST", true},
-		{"/exec/abc123/json", "GET", false}, // GET is allowed
+		{"/exec/abc123/json", "GET", true},
+		{"/system/df", "GET", true}, // Portainer does not filter it: every container and volume on the host
+		{"/v1.43/system/df", "GET", true},
+		{"/system/df", "HEAD", true},
+		{"/info", "GET", true},
+		{"/images/json", "GET", true},
+		{"/images/nginx/json", "GET", true},
+		{"/networks", "GET", true},
+		{"/plugins", "GET", true},
+		{"/services", "GET", true},
+		{"/tasks", "GET", true},
+		{"/nodes", "GET", true},
+		{"/swarm", "GET", true},
+		{"/secrets", "GET", true},
+		{"/configs", "GET", true},
+		{"/distribution/nginx/json", "GET", true},
+		{"/containers/abc123/export", "GET", true},
+		{"/containers/json/json", "GET", true},
+		{"/volumes", "GET", false},
+		{"/volumes/data", "GET", false},
+		{"/v1.43/version", "GET", false},
+		{"/_ping", "HEAD", false},
 		{"/images/create", "POST", true},
 		{"/containers/json", "GET", false}, // container list is allowed
 		{"/containers/create", "POST", true},
