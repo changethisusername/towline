@@ -94,8 +94,23 @@ func TestRemoteAutoDeployNeedsOwnerAcceptance(t *testing.T) {
 	assert.Contains(t, stdout, "--accept-auto-deploy")
 	assert.Contains(t, stdout, "acme/blog@main:docker-compose.yml")
 
-	// The owner accepts it.
-	stdout, err = captureStdout(t, func() error { return runRemote([]string{"deploy", "--accept-auto-deploy"}) })
+	// A bare --accept-auto-deploy names nothing: it lists what is pending,
+	// old → new, and deploys nothing.
+	err = runRemote([]string{"deploy", "--accept-auto-deploy"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blog-dev: (none accepted)\n    → repo=acme/blog branch=main")
+	err = runRemote([]string{"deploy", "--accept-auto-deploy", "--compose-dir", out})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blog-dev")
+	rc, err := loadRemoteConfig()
+	require.NoError(t, err)
+	assert.Empty(t, rc.AutoDeployAccepted)
+	// Unknown names, or projects without a block, are refused.
+	assert.ErrorContains(t, runRemote([]string{"deploy", "--accept-auto-deploy", "nope"}), "nope")
+	assert.ErrorContains(t, runRemote([]string{"deploy", "--accept-auto-deploy", "shop"}), "shop")
+
+	// The owner accepts it (by directory or stack name).
+	stdout, err = captureStdout(t, func() error { return runRemote([]string{"deploy", "--accept-auto-deploy", "blog"}) })
 	require.NoError(t, err)
 	ad := autoDeployOf(deployedGatewayConfig(t, out), "blog-dev")
 	require.NotNil(t, ad)
@@ -103,7 +118,7 @@ func TestRemoteAutoDeployNeedsOwnerAcceptance(t *testing.T) {
 	assert.Contains(t, stdout, "Auto-deploy: blog-dev deploys acme/blog@main:docker-compose.yml")
 	assert.Contains(t, stdout, "WITHOUT your approval", "approval prod on a dev project")
 	assert.Contains(t, stdout, "public repositories only")
-	rc, err := loadRemoteConfig()
+	rc, err = loadRemoteConfig()
 	require.NoError(t, err)
 	require.Len(t, rc.AutoDeployAccepted, 1)
 
@@ -130,11 +145,76 @@ func TestRemoteAutoDeployNeedsOwnerAcceptance(t *testing.T) {
 	require.NoError(t, runRemote([]string{"deploy"}))
 	assert.NotNil(t, autoDeployOf(deployedGatewayConfig(t, out), "blog-dev"))
 
-	// An invalid block fails the deploy, naming the project directory.
-	setAutoDeploy(t, cfg.ProjectsDir, "blog", map[string]any{"repo": "acme/blog", "compose_path": "../../etc/x.yml"})
+	// A compose policy change turns it off too, until accepted again.
+	setComposePolicy(t, cfg.ProjectsDir, "blog", &config.ComposePolicyConfig{Mode: "enforce", AllowBindMounts: []string{"/"}})
+	stdout, err = captureStdout(t, func() error { return runRemote([]string{"deploy"}) })
+	require.NoError(t, err)
+	assert.Nil(t, autoDeployOf(deployedGatewayConfig(t, out), "blog-dev"))
+	assert.Contains(t, stdout, "compose policy")
 	err = runRemote([]string{"deploy", "--accept-auto-deploy"})
+	assert.ErrorContains(t, err, "bind_mounts=[/]")
+	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy=blog-dev"}))
+	assert.NotNil(t, autoDeployOf(deployedGatewayConfig(t, out), "blog-dev"))
+
+	// An invalid block is ignored with a notice, and doesn't break other
+	// commands; it fails only when accepting it, naming the directory.
+	setAutoDeploy(t, cfg.ProjectsDir, "blog", map[string]any{"repo": "acme/blog", "compose_path": "../../etc/x.yml"})
+	stdout, err = captureStdout(t, func() error { return runRemote([]string{"deploy"}) })
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "invalid, ignored")
+	assert.Nil(t, autoDeployOf(deployedGatewayConfig(t, out), "blog-dev"))
+	require.NoError(t, runRemote([]string{"owner-token"}))
+	_, err = captureStdout(t, func() error { return runRemote([]string{"status"}) })
+	require.NoError(t, err)
+	err = runRemote([]string{"deploy", "--accept-auto-deploy", "blog"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), filepath.Join(cfg.ProjectsDir, "blog"))
+}
+
+// Accepting one project leaves another project's new block off.
+func TestRemoteAutoDeployAcceptsOnlyNamedProjects(t *testing.T) {
+	cfg := remoteTestEnv(t, "http://127.0.0.1:1")
+	out := filepath.Join(t.TempDir(), "gw")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "shop", "blog"}))
+	setAutoDeploy(t, cfg.ProjectsDir, "blog", map[string]any{"repo": "acme/blog"})
+	setAutoDeploy(t, cfg.ProjectsDir, "shop", map[string]any{"repo": "evil/shop"})
+	stdout, err := captureStdout(t, func() error { return runRemote([]string{"deploy", "--accept-auto-deploy", "blog"}) })
+	require.NoError(t, err)
+	gc := deployedGatewayConfig(t, out)
+	assert.NotNil(t, autoDeployOf(gc, "blog-dev"))
+	assert.Nil(t, autoDeployOf(gc, "shop-prod"))
+	assert.Contains(t, stdout, "auto-deploy for shop-prod")
+	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy", "blog,shop-prod"}))
+	assert.NotNil(t, autoDeployOf(deployedGatewayConfig(t, out), "shop-prod"))
+}
+
+func TestRemoteGitHubTokenPromptOnTTY(t *testing.T) {
+	remoteTestEnv(t, "http://127.0.0.1:1")
+	out := filepath.Join(t.TempDir(), "gw")
+	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "shop"}))
+	var prompt strings.Builder
+	readStdin = strings.NewReader("ghp_abc\n")
+	oldTTY, oldOut := stdinIsTerminal, promptOut
+	t.Cleanup(func() { readStdin, stdinIsTerminal, promptOut = os.Stdin, oldTTY, oldOut })
+	promptOut = &prompt
+	stdinIsTerminal = func() bool { return true }
+	require.NoError(t, runRemote([]string{"github", "--token-stdin", "--no-deploy"}))
+	assert.Equal(t, "Paste the token, then press Ctrl-D\n", prompt.String())
+
+	prompt.Reset()
+	readStdin = strings.NewReader("ghp_def\n")
+	stdinIsTerminal = func() bool { return false }
+	require.NoError(t, runRemote([]string{"github", "--token-stdin", "--no-deploy"}))
+	assert.Empty(t, prompt.String(), "no prompt when the token is piped in")
+}
+
+func setComposePolicy(t *testing.T, projectsDir, name string, cp *config.ComposePolicyConfig) {
+	t.Helper()
+	dir := filepath.Join(projectsDir, name)
+	pc, err := config.LoadProjectConfig(dir)
+	require.NoError(t, err)
+	pc.ComposePolicy = cp
+	require.NoError(t, config.SaveProjectConfig(dir, pc))
 }
 
 func TestRemoteGitHubSettings(t *testing.T) {
@@ -142,7 +222,7 @@ func TestRemoteGitHubSettings(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "gw")
 	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "shop"}))
 	setAutoDeploy(t, cfg.ProjectsDir, "shop", map[string]any{"repo": "acme/shop"})
-	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy"}))
+	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy", "shop"}))
 
 	const token = "github_pat_11SECRETVALUE_abc"
 	readStdin = strings.NewReader(token + "\n")
@@ -186,7 +266,7 @@ func TestRemoteAutoDeployAcceptanceDroppedWithProject(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "gw")
 	require.NoError(t, runRemote([]string{"setup", "--url", "https://mcp.example.com", "--tunnel-token", "eyJhIjoidGVzdCJ9tunneltoken00", "--compose-dir", out, "shop", "blog"}))
 	setAutoDeploy(t, cfg.ProjectsDir, "blog", map[string]any{"repo": "acme/blog"})
-	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy"}))
+	require.NoError(t, runRemote([]string{"deploy", "--accept-auto-deploy", "blog"}))
 	require.NoError(t, runRemote([]string{"remove", "blog"}))
 	rc, err := loadRemoteConfig()
 	require.NoError(t, err)

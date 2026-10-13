@@ -207,6 +207,27 @@ func pathOnly(p string) string {
 	return p
 }
 
+// repoID returns the repository's numeric id, which stays the same across
+// renames and differs for a repository deleted and recreated under the same
+// name.
+func (c *githubClient) repoID(ctx context.Context, repo string) (int64, error) {
+	body, err := c.get(ctx, repoPath(repo), "application/vnd.github+json", maxGitHubJSON, true)
+	if err != nil {
+		return 0, err
+	}
+	var r struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil || r.ID <= 0 {
+		return 0, errors.New("github: invalid repository response")
+	}
+	if !strings.EqualFold(r.FullName, repo) {
+		return 0, fmt.Errorf("github: %s answered for another repository", repoPath(repo))
+	}
+	return r.ID, nil
+}
+
 // branchHead returns the SHA the branch points at.
 func (c *githubClient) branchHead(ctx context.Context, repo, branch string) (string, error) {
 	path := repoPath(repo) + "/commits/heads/" + escapeSegments(branch)
@@ -251,7 +272,9 @@ func (c *githubClient) checks(ctx context.Context, repo, sha string) (checkResul
 	if !shaPattern.MatchString(sha) {
 		return checkResult{}, errors.New("github: invalid commit SHA")
 	}
-	body, err := c.get(ctx, repoPath(repo)+"/commits/"+sha+"/check-runs?per_page=100", "application/vnd.github+json", maxGitHubJSON, false)
+	// Both check reads are conditional, so a head that waits on its
+	// checks for a long time costs little rate limit.
+	body, err := c.get(ctx, repoPath(repo)+"/commits/"+sha+"/check-runs?per_page=100", "application/vnd.github+json", maxGitHubJSON, true)
 	if err != nil {
 		return checkResult{}, err
 	}
@@ -265,7 +288,7 @@ func (c *githubClient) checks(ctx context.Context, repo, sha string) (checkResul
 	if err := json.Unmarshal(body, &runs); err != nil || runs.TotalCount == nil {
 		return checkResult{}, errors.New("github: invalid check runs response")
 	}
-	body, err = c.get(ctx, repoPath(repo)+"/commits/"+sha+"/status", "application/vnd.github+json", maxGitHubJSON, false)
+	body, err = c.get(ctx, repoPath(repo)+"/commits/"+sha+"/status", "application/vnd.github+json", maxGitHubJSON, true)
 	if err != nil {
 		return checkResult{}, err
 	}

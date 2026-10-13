@@ -151,3 +151,36 @@ func TestEnvFilter_Origin(t *testing.T) {
 		})
 	}
 }
+
+func TestApprovalResultClassifiers(t *testing.T) {
+	approver := &fakeApprover{status: approval.StatusPending}
+	handler := NewTierGating(TierProd, newGate(t, approver), "updateLocalStack")(passthroughHandler())
+
+	// An unknown token: invalid, nothing ran.
+	res, err := handler(context.Background(), makeRequest(map[string]any{"id": 1, "approvalToken": "0123456789abcdef0123456789abcdef"}))
+	require.NoError(t, err)
+	assert.True(t, ApprovalTokenInvalid(res))
+	assert.False(t, ApprovalRequestFailed(res))
+
+	// Submitting the request fails.
+	approver.submitErr = assert.AnError
+	res, err = handler(context.Background(), makeRequest(map[string]any{"id": 1}))
+	require.NoError(t, err)
+	assert.True(t, ApprovalRequestFailed(res))
+	assert.False(t, ApprovalTokenInvalid(res))
+
+	// Arguments too large to show the approver.
+	approver.submitErr = nil
+	big := make([]byte, maxDescriptionLen+1)
+	for i := range big {
+		big[i] = 'a'
+	}
+	res, err = handler(context.Background(), makeRequest(map[string]any{"id": 1, "note": string(big)}))
+	require.NoError(t, err)
+	assert.True(t, ApprovalRequestFailed(res))
+
+	for _, r := range []*mcp.CallToolResult{nil, mcp.NewToolResultText("Local stack updated successfully"), mcp.NewToolResultError("compose policy: privileged mode is not allowed")} {
+		assert.False(t, ApprovalTokenInvalid(r))
+		assert.False(t, ApprovalRequestFailed(r))
+	}
+}

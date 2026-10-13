@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +23,7 @@ type fakeGitHub struct {
 	runs     map[string][]map[string]any // sha -> check runs
 	statuses map[string]string           // sha -> combined state ("" = none)
 	messages map[string]string           // sha -> commit message
+	repoIDs  map[string]int64            // repo -> id (default 42)
 	requests []string                    // "path auth=<header>"
 	override func(http.ResponseWriter, *http.Request) bool
 }
@@ -28,7 +31,7 @@ type fakeGitHub struct {
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
 	f := &fakeGitHub{heads: map[string]string{}, files: map[string]string{}, runs: map[string][]map[string]any{},
-		statuses: map[string]string{}, messages: map[string]string{}}
+		statuses: map[string]string{}, messages: map[string]string{}, repoIDs: map[string]int64{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -73,7 +76,7 @@ func (f *fakeGitHub) count(substr string) int {
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	f.requests = append(f.requests, r.URL.EscapedPath()+" auth="+r.Header.Get("Authorization"))
+	f.requests = append(f.requests, r.URL.EscapedPath()+" auth="+r.Header.Get("Authorization")+" inm="+r.Header.Get("If-None-Match"))
 	override := f.override
 	f.mu.Unlock()
 	if override != nil && override(w, r) {
@@ -91,6 +94,21 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) == 2 {
+		repo := parts[0] + "/" + parts[1]
+		id, ok := f.repoIDs[repo]
+		if !ok {
+			id = 42
+		}
+		etag := fmt.Sprintf(`"repo-%d"`, id)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "full_name": repo})
+		return
+	}
 	if len(parts) < 3 {
 		http.NotFound(w, r)
 		return
@@ -124,7 +142,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		if runs == nil {
 			runs = []map[string]any{}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "check_runs": runs})
+		writeJSONWithETag(w, r, map[string]any{"total_count": len(runs), "check_runs": runs})
 	case strings.HasSuffix(tail, "/status"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(tail, "commits/"), "/status")
 		state := f.statuses[sha]
@@ -134,7 +152,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		} else {
 			state = "pending" // GitHub's combined state with no statuses
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"state": state, "total_count": n})
+		writeJSONWithETag(w, r, map[string]any{"state": state, "total_count": n})
 	case strings.HasPrefix(tail, "contents/"):
 		content, ok := f.files[r.URL.Query().Get("ref")+":"+strings.TrimPrefix(tail, "contents/")]
 		if !ok || r.Header.Get("Accept") != "application/vnd.github.raw" {
@@ -145,6 +163,19 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// writeJSONWithETag answers 304 when the client already has this body.
+func writeJSONWithETag(w http.ResponseWriter, r *http.Request, v any) {
+	body, _ := json.Marshal(v)
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write(body)
 }
 
 const (
@@ -381,5 +412,50 @@ func TestSanitizeLine(t *testing.T) {
 		if got := sanitizeLine(in, maxSubjectRunes); got != want {
 			t.Errorf("sanitizeLine(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestGitHubChecksUseETags(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.commit(shaA, "x.yml", "services: {}\n", "x")
+	gh := f.client("")
+	ctx := context.Background()
+	first, err := gh.checks(ctx, "acme/shop", shaA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := gh.checks(ctx, "acme/shop", shaA)
+	if err != nil || second != first {
+		t.Fatalf("cached checks = %+v, %v", second, err)
+	}
+	if f.count("/check-runs auth= inm=\"") != 1 || f.count("/status auth= inm=\"") != 1 {
+		t.Fatalf("second read was not conditional: %v", f.requests)
+	}
+	// A change is seen.
+	f.setRuns(shaA, map[string]any{"status": "completed", "conclusion": "failure"})
+	if got, _ := gh.checks(ctx, "acme/shop", shaA); got.State != checksFailed {
+		t.Fatalf("state after change %s", got.State)
+	}
+}
+
+func TestGitHubRepoID(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.repoIDs["acme/shop"] = 7
+	gh := f.client("")
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if id, err := gh.repoID(ctx, "acme/shop"); err != nil || id != 7 {
+			t.Fatalf("repoID = %d, %v", id, err)
+		}
+	}
+	if f.count("/repos/acme/shop auth= inm=\"") != 1 {
+		t.Fatalf("second read was not conditional: %v", f.requests)
+	}
+	f.override = func(w http.ResponseWriter, r *http.Request) bool {
+		fmt.Fprint(w, `{"id": 9, "full_name": "evil/shop"}`)
+		return true
+	}
+	if _, err := newGitHubClient(f.srv.URL, "").repoID(ctx, "acme/shop"); err == nil {
+		t.Fatal("answer for another repository accepted")
 	}
 }

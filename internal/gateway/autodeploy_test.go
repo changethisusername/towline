@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,10 +239,14 @@ func TestAutoDeployApprovalFlow(t *testing.T) {
 	if rec.Client != "autodeploy:alpha" || rec.StackContent != composeB || rec.Project != "alpha-dev" {
 		t.Fatalf("request %+v", rec)
 	}
-	for _, want := range []string{shaB, "Subject: feat: nginx 2", "acme/shop", "Arguments:"} {
+	for _, want := range []string{shaB, "acme/shop", "Arguments:", "Commit subject (from GitHub, untrusted): \"feat: nginx 2\"\n\nArguments:"} {
 		if !strings.Contains(rec.Description, want) {
 			t.Fatalf("description missing %q:\n%s", want, rec.Description)
 		}
+	}
+	// The untrusted subject comes after everything towline vouches for.
+	if strings.Index(rec.Description, "Commit subject") < strings.Index(rec.Description, "Stack:") {
+		t.Fatalf("subject not last:\n%s", rec.Description)
 	}
 	if strings.Contains(rec.Description, "long body") || strings.Contains(rec.Description, "\x1b") {
 		t.Fatalf("subject not sanitized:\n%s", rec.Description)
@@ -600,11 +605,10 @@ func TestAutoDeployLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	audit := zerolog.Nop()
-	g, err := New(cfg, Options{Builder: newAutoDeployBuilder(d), Audit: &audit, github: gh.client(""), pollInterval: 20 * time.Millisecond})
+	g, err := New(cfg, Options{Builder: newAutoDeployBuilder(d), Audit: &audit, github: gh.client(""), pollInterval: 20 * time.Millisecond, noSettle: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.autodeploy.settle = 0
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
@@ -623,5 +627,219 @@ func TestAutoDeployLoop(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if gh.count("/repos/") != n {
 		t.Fatal("watcher kept polling after Close")
+	}
+}
+
+func TestAutoDeployRepoIDBinding(t *testing.T) {
+	gh := startedRepo(t)
+	gh.repoIDs["acme/shop"] = 100
+	h := newAutoDeployHarness(t, gh, t.TempDir(), ApprovalProd, nil)
+	h.tick(t)
+	if r := h.record(); r.RepoID != 100 {
+		t.Fatalf("baseline did not record the repository id: %+v", r)
+	}
+	// The name now points at another repository: nothing deploys.
+	gh.mu.Lock()
+	gh.repoIDs["acme/shop"] = 666
+	gh.mu.Unlock()
+	gh.setHead("acme/shop", "main", shaB)
+	h.tick(t)
+	h.tick(t)
+	if len(h.cap.list()) != 0 {
+		t.Fatal("deployed from a different repository")
+	}
+	if !strings.Contains(h.status(), "different GitHub repository") {
+		t.Fatalf("status %q", h.status())
+	}
+
+	// A record from before ids were kept gets one at the next check.
+	gh2 := startedRepo(t)
+	h2 := newAutoDeployHarness(t, gh2, t.TempDir(), ApprovalProd, nil)
+	if err := h2.store.SetAutoDeployRecord("alpha", AutoDeployRecord{Fingerprint: "acme/shop|main|docker-compose.yml", DeployedSHA: shaA}); err != nil {
+		t.Fatal(err)
+	}
+	h2.tick(t)
+	if r := h2.record(); r.RepoID != 42 || r.DeployedSHA != shaA {
+		t.Fatalf("id not filled: %+v", r)
+	}
+}
+
+func TestAutoDeployApprovedButHeadMoved(t *testing.T) {
+	h := newAutoDeployHarness(t, startedRepo(t), t.TempDir(), ApprovalAlways, nil)
+	h.tick(t)
+	h.gh.setHead("acme/shop", "main", shaB)
+	h.tick(t)
+	pd := h.autodeploy.projects["alpha"].peekPending()
+	if err := h.approvals.Decide(pd.RequestID, approval.StatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	h.gh.setHead("acme/shop", "main", shaC)
+	h.tick(t)
+	for _, d := range h.cap.list() {
+		if d.File == composeB {
+			t.Fatal("deployed the approved commit after the branch moved on")
+		}
+	}
+	if h.mcp.built["alpha"].Approvals.Peek(pd.Token, pd.Args) != nil {
+		t.Fatal("token of the superseded approval not consumed")
+	}
+	// The newer head is asked for in the same check.
+	if p := pendingRecords(h.Gateway); len(p) != 1 || p[0].StackContent != composeC {
+		t.Fatalf("pending: %+v", p)
+	}
+}
+
+func TestAutoDeployExpiredTokenIsAskedAgain(t *testing.T) {
+	h := newAutoDeployHarness(t, startedRepo(t), t.TempDir(), ApprovalAlways, nil)
+	h.tick(t)
+	h.gh.setHead("acme/shop", "main", shaB)
+	h.tick(t)
+	pd := h.autodeploy.projects["alpha"].peekPending()
+	// The token expires (the store drops it) just as the owner approves.
+	h.mcp.built["alpha"].Approvals.Consume(pd.Token)
+	if err := h.approvals.Decide(pd.RequestID, approval.StatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(t)
+	if r := h.record(); r.FailedSHA != "" || len(h.cap.list()) != 0 {
+		t.Fatalf("expired token marked the commit failed: %+v", r)
+	}
+	if !strings.Contains(h.status(), "expired") || h.autodeploy.projects["alpha"].peekPending() != nil {
+		t.Fatalf("status %q", h.status())
+	}
+	h.tick(t)
+	if len(pendingRecords(h.Gateway)) != 1 {
+		t.Fatal("not asked again after the token expired")
+	}
+}
+
+func TestAutoDeployApprovalSubmitFailureRetries(t *testing.T) {
+	h := newAutoDeployHarness(t, startedRepo(t), t.TempDir(), ApprovalAlways, nil)
+	h.tick(t)
+	// The watcher's client already has the most pending requests allowed.
+	var ids []string
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("filler-%d", i)
+		ids = append(ids, id)
+		if err := h.approvals.Submit(context.Background(), approval.Request{ID: id, Project: "alpha-dev", Action: "x", Client: "autodeploy:alpha"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.gh.setHead("acme/shop", "main", shaB)
+	h.tick(t)
+	if r := h.record(); r.FailedSHA != "" {
+		t.Fatalf("submit failure marked the commit failed: %+v", r)
+	}
+	if !strings.Contains(h.status(), "could not request approval") {
+		t.Fatalf("status %q", h.status())
+	}
+	for _, id := range ids {
+		_ = h.approvals.Withdraw(id)
+	}
+	h.tick(t)
+	if p := pendingRecords(h.Gateway); len(p) != 1 || p[0].StackContent != composeB {
+		t.Fatalf("not retried: %+v", p)
+	}
+}
+
+func TestAutoDeployRejectionAfterForceSticks(t *testing.T) {
+	h := newAutoDeployHarness(t, startedRepo(t), t.TempDir(), ApprovalAlways, nil)
+	h.tick(t)
+	if err := h.autodeploy.forceLatest("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(t)
+	p := h.autodeploy.projects["alpha"]
+	pd := p.peekPending()
+	if pd == nil || pd.SHA != shaA {
+		t.Fatal("forced deploy did not ask for approval")
+	}
+	// "Deploy latest now" again while that request waits: force is
+	// cleared, not left to override a later rejection.
+	if err := h.autodeploy.forceLatest("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(t)
+	if p.forced() {
+		t.Fatal("force kept while the head's request is pending")
+	}
+	if err := h.autodeploy.forceLatest("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.approvals.Decide(pd.RequestID, approval.StatusRejected); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(t)
+	h.tick(t)
+	if p.forced() || len(h.approvals.Records()) != 1 || h.record().RejectedSHA != shaA {
+		t.Fatalf("rejection did not stick: forced=%v records=%d %+v", p.forced(), len(h.approvals.Records()), h.record())
+	}
+}
+
+// The owner deciding on /ui nudges the watcher without the usual gap.
+func TestAutoDeployDecisionNudgeSkipsGap(t *testing.T) {
+	gh := startedRepo(t)
+	d := &deployCapture{stacks: `[{"id":1,"name":"alpha-dev","endpoint_id":3}]`}
+	cfg := &Config{
+		PublicURL:      "http://127.0.0.1:9",
+		DataDir:        t.TempDir(),
+		OwnerTokenHash: approval.HashToken(testOwnerToken),
+		Portainer:      PortainerConfig{URL: "https://portainer.invalid"},
+		Projects: []ProjectConfig{{Name: "alpha", Stack: "alpha-dev", Tier: "dev", Token: "ptr_a", Approval: ApprovalAlways,
+			AutoDeploy: &AutoDeployConfig{Repo: "acme/shop"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	audit := zerolog.Nop()
+	g, err := New(cfg, Options{Builder: newAutoDeployBuilder(d), Audit: &audit, github: gh.client(""), pollInterval: time.Hour, noSettle: true, firstCheckNow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.Close)
+	waitFor := func(what string, within time.Duration, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitFor("baseline", 2*time.Second, func() bool { _, ok := g.store.AutoDeployRecord("alpha"); return ok })
+	gh.setHead("acme/shop", "main", shaB)
+	g.autodeploy.nudgeProject("alpha")
+	waitFor("approval request", 2*time.Second, func() bool { return len(pendingRecords(g)) == 1 })
+	if err := g.approvals.Decide(pendingRecords(g)[0].ID, approval.StatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	g.autodeploy.nudgeProject("alpha") // what the /ui decision handler does
+	waitFor("deploy right after the decision", 2*time.Second, func() bool { return len(d.list()) == 1 })
+}
+
+// Only the repository, branch and compose path start a new baseline.
+func TestAutoDeployBaselineTriggers(t *testing.T) {
+	dir := t.TempDir()
+	gh := startedRepo(t)
+	h := newAutoDeployHarness(t, gh, dir, ApprovalProd, nil)
+	h.tick(t)
+	h.Close()
+	gh.setHead("acme/shop", "main", shaB)
+	f := false
+	h2 := newAutoDeployHarness(t, gh, dir, ApprovalProd, func(p *ProjectConfig) {
+		p.AutoDeploy.RequireChecks = &f
+		p.AutoDeploy.CommitEnv = "OTHER_SHA"
+	})
+	h2.tick(t)
+	if len(h2.cap.list()) != 1 || h2.record().DeployedSHA != shaB {
+		t.Fatalf("checks/commit_env change re-baselined: %+v", h2.record())
+	}
+	h2.Close()
+	gh.setHead("acme/shop", "main", shaC)
+	h3 := newAutoDeployHarness(t, gh, dir, ApprovalProd, func(p *ProjectConfig) { p.AutoDeploy.ComposePath = "deploy.yml" })
+	h3.tick(t)
+	if len(h3.cap.list()) != 0 || h3.record().DeployedSHA != shaC {
+		t.Fatalf("path change did not re-baseline: %+v", h3.record())
 	}
 }

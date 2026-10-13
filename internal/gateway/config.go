@@ -168,11 +168,13 @@ func (a AutoDeployConfig) ChecksRequired() bool {
 	return a.RequireChecks == nil || *a.RequireChecks
 }
 
-// Fingerprint identifies what the block deploys. The owner accepts a
-// fingerprint; any change needs a new acceptance. Call it after Validate
-// so that defaults are filled in.
+// Fingerprint identifies where the block deploys from: repository,
+// branch and compose path. A change to any of them starts the watcher over
+// from a new baseline. (Owner acceptance, done by the CLI, covers every
+// field and the compose policy.) Call it after Validate so that defaults
+// are filled in.
 func (a AutoDeployConfig) Fingerprint() string {
-	return strings.Join([]string{a.Repo, a.Branch, a.ComposePath, fmt.Sprint(a.ChecksRequired()), a.CommitEnv}, "|")
+	return strings.Join([]string{a.Repo, a.Branch, a.ComposePath}, "|")
 }
 
 // ComposePolicyConfig mirrors the project's compose policy.

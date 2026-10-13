@@ -68,6 +68,8 @@ type Options struct {
 	github           *githubClient
 	pollInterval     time.Duration
 	manualAutoDeploy bool
+	firstCheckNow    bool
+	noSettle         bool
 }
 
 // New creates a gateway from a validated config.
@@ -147,6 +149,12 @@ func New(cfg *Config, opts Options) (*Gateway, error) {
 			}
 		}
 		g.autodeploy = newAutoDeployer(g, gh, interval)
+		if opts.noSettle {
+			g.autodeploy.settle = 0
+		}
+		if opts.firstCheckNow {
+			g.autodeploy.firstDelay = func() time.Duration { return 0 }
+		}
 		if !opts.manualAutoDeploy {
 			g.autodeploy.start()
 		}

@@ -342,7 +342,7 @@ func TestEndToEndAutoDeploy(t *testing.T) {
 	if env["GIT_SHA"] != shaB {
 		t.Fatalf("commit env: %v", env)
 	}
-	if !strings.Contains(env["_TOWLINE_DEPLOYMENTS"], "Auto-deploy acme/shop@bbbbbbb: feat: nginx 2") {
+	if !strings.Contains(env["_TOWLINE_DEPLOYMENTS"], `"description":"Auto-deploy acme/shop@bbbbbbb"`) || strings.Contains(env["_TOWLINE_DEPLOYMENTS"], "feat: nginx 2") {
 		t.Fatalf("deployment history: %s", env["_TOWLINE_DEPLOYMENTS"])
 	}
 	if body["pullImage"] != true {

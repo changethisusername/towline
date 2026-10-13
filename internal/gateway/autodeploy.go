@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -51,6 +52,8 @@ type autoDeployer struct {
 	interval time.Duration
 	settle   time.Duration
 	now      func() time.Time
+	// firstDelay is how long a project waits before its first check.
+	firstDelay func() time.Duration
 
 	projects map[string]*adProject
 	order    []string
@@ -68,6 +71,9 @@ type adProject struct {
 	callerID string
 	// nudge asks the project's goroutine to check now (cap 1).
 	nudge chan struct{}
+	// urgent makes the next nudge skip minNudgeGap (the owner just
+	// decided an approval on the page).
+	urgent atomic.Bool
 
 	mu        sync.Mutex
 	pending   *pendingDeploy
@@ -103,6 +109,11 @@ func newAutoDeployer(g *Gateway, gh *githubClient, interval time.Duration) *auto
 		cancel:   cancel,
 		stop:     make(chan struct{}),
 	}
+	// The first check soon after start sets the baseline; projects start
+	// at random times within the first 10 seconds.
+	a.firstDelay = func() time.Duration {
+		return time.Duration(rand.Int64N(int64(min(a.interval, 10*time.Second)) + 1))
+	}
 	for _, p := range g.cfg.Projects {
 		if p.AutoDeploy == nil {
 			continue
@@ -127,7 +138,10 @@ func (a *autoDeployer) start() {
 	}
 }
 
-// close stops the goroutines, waiting for a deploy in progress to finish.
+// close stops the goroutines and waits for them to return. It cancels the
+// watcher's context, which aborts GitHub requests in flight; tool calls run
+// on a context without that cancellation (see callInternal), so a deploy
+// already handed to Portainer completes before close returns.
 func (a *autoDeployer) close() {
 	a.once.Do(func() {
 		close(a.stop)
@@ -143,10 +157,7 @@ func (a *autoDeployer) jittered() time.Duration {
 
 func (a *autoDeployer) run(p *adProject) {
 	defer a.wg.Done()
-	// The first check soon after start sets the baseline; projects start
-	// at random times within the first 10 seconds.
-	first := min(a.interval, 10*time.Second)
-	timer := time.NewTimer(time.Duration(rand.Int64N(int64(first) + 1)))
+	timer := time.NewTimer(a.firstDelay())
 	defer timer.Stop()
 	var last time.Time
 	for {
@@ -155,6 +166,9 @@ func (a *autoDeployer) run(p *adProject) {
 			return
 		case <-timer.C:
 		case <-p.nudge:
+			if p.urgent.Swap(false) {
+				break
+			}
 			if gap := minNudgeGap - time.Since(last); gap > 0 {
 				select {
 				case <-a.stop:
@@ -180,9 +194,10 @@ func (a *autoDeployer) safeCheck(p *adProject) {
 	a.check(a.ctx, p)
 }
 
-// nudgeRepo asks every project watching repo's branch named by ref
-// ("refs/heads/<branch>") to check now. It returns how many matched. A
-// nudge carries no data: the watcher always asks GitHub itself.
+// nudgeRepo asks every project watching repo to check now: for a push,
+// only those watching the branch named by ref ("refs/heads/<branch>"); with
+// ref "" (check suite and status events), every branch. It returns how many
+// matched. A nudge carries no data: the watcher always asks GitHub itself.
 func (a *autoDeployer) nudgeRepo(repo, ref string) int {
 	if a == nil {
 		return 0
@@ -191,7 +206,7 @@ func (a *autoDeployer) nudgeRepo(repo, ref string) int {
 	for _, name := range a.order {
 		p := a.projects[name]
 		ad := p.cfg.AutoDeploy
-		if strings.EqualFold(repo, ad.Repo) && ref == "refs/heads/"+ad.Branch {
+		if strings.EqualFold(repo, ad.Repo) && (ref == "" || ref == "refs/heads/"+ad.Branch) {
 			p.poke()
 			n++
 		}
@@ -199,12 +214,14 @@ func (a *autoDeployer) nudgeRepo(repo, ref string) int {
 	return n
 }
 
-// nudgeProject asks one project to check now.
+// nudgeProject asks one project to check now, without waiting out
+// minNudgeGap (the owner decided one of its approvals).
 func (a *autoDeployer) nudgeProject(name string) {
 	if a == nil {
 		return
 	}
 	if p := a.projects[name]; p != nil {
+		p.urgent.Store(true)
 		p.poke()
 	}
 }
@@ -331,6 +348,30 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 	name := p.cfg.Name
 	fp := ad.Fingerprint()
 
+	// 0. The repository must still be the one auto-deploy was set up
+	// with: a name can be deleted and taken by someone else.
+	repoID, err := a.gh.repoID(ctx, ad.Repo)
+	if err != nil {
+		p.setStatus(a.now(), "cannot read the repository: "+sanitizeText(err.Error(), maxErrorRunes))
+		return
+	}
+	if rec, ok := a.g.store.AutoDeployRecord(name); ok && rec.Fingerprint == fp {
+		switch {
+		case rec.RepoID == 0:
+			rec.RepoID = repoID
+			if !a.saveRecord(p, rec) {
+				return
+			}
+		case rec.RepoID != repoID:
+			if pd := p.takePending(); pd != nil {
+				a.withdraw(p, pd)
+			}
+			a.event(p, "repo_id_mismatch", "").with(fmt.Sprintf("was %d, now %d", rec.RepoID, repoID)).log()
+			p.setStatus(a.now(), fmt.Sprintf("stopped: %s is now a different GitHub repository (id %d, was %d); nothing is deployed. Turn auto-deploy off and on again if this is expected.", ad.Repo, repoID, rec.RepoID))
+			return
+		}
+	}
+
 	// 1. A deploy waiting for approval.
 	if pd := p.peekPending(); pd != nil {
 		status, err := a.g.approvals.Status(ctx, pd.RequestID)
@@ -340,7 +381,19 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 			p.takePending()
 			a.event(p, "approval_lost", pd.SHA).log()
 		case status == approval.StatusApproved:
+			// Deploy only if the approved commit is still the head; a
+			// newer commit is handled below and asked for afresh.
+			head, err := a.gh.branchHead(ctx, ad.Repo, ad.Branch)
+			if err != nil {
+				p.setStatus(a.now(), "approved; cannot read the branch to confirm it: "+sanitizeText(err.Error(), maxErrorRunes))
+				return
+			}
 			p.takePending()
+			if head != pd.SHA {
+				a.withdraw(p, pd)
+				a.event(p, "approved_but_superseded", pd.SHA).log()
+				break
+			}
 			a.event(p, "approved", pd.SHA).log()
 			args := maps.Clone(pd.Args)
 			args["approvalToken"] = pd.Token
@@ -350,10 +403,19 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 				p.setPending(pd)
 				return
 			}
+			if err == nil && middleware.ApprovalTokenInvalid(res) {
+				// The token expired before it could be used; nothing ran.
+				// The next check asks again.
+				a.event(p, "approval_token_expired", pd.SHA).log()
+				p.setStatus(a.now(), fmt.Sprintf("the approval for %s expired before it could be used; asking again", short(pd.SHA)))
+				return
+			}
 			a.finish(p, pd.SHA, res, err)
 			return
 		case status == approval.StatusRejected:
 			p.takePending()
+			// A rejection sticks, even after "Deploy latest now".
+			p.clearForce()
 			rec, _ := a.g.store.AutoDeployRecord(name)
 			if rec.Fingerprint == fp {
 				rec.RejectedSHA = pd.SHA
@@ -378,11 +440,11 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 	p.mu.Unlock()
 	force := p.forced()
 
-	// 3. Baseline: on first enable, or when the repo, branch or path
-	// changed, the current head counts as deployed.
+	// 3. Baseline: on first enable, or when the repository, branch or
+	// compose path changed, the current head counts as deployed.
 	rec, ok := a.g.store.AutoDeployRecord(name)
 	if !ok || rec.Fingerprint != fp {
-		rec = AutoDeployRecord{Fingerprint: fp, DeployedSHA: head}
+		rec = AutoDeployRecord{Fingerprint: fp, RepoID: repoID, DeployedSHA: head}
 		if !a.saveRecord(p, rec) {
 			return
 		}
@@ -395,6 +457,7 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 
 	// 4. Already waiting for this commit.
 	if pd := p.peekPending(); pd != nil && pd.SHA == head {
+		p.clearForce()
 		p.setStatus(a.now(), fmt.Sprintf("%s is waiting for your approval", short(head)))
 		return
 	}
@@ -458,20 +521,23 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 		return
 	}
 
-	// 8. Deploy through the project's own updateLocalStack.
+	// 8. Deploy through the project's own updateLocalStack. The commit
+	// subject is written by whoever authored the commit: it is shown to
+	// the approver last and marked untrusted, and kept out of the
+	// deployment history agents read.
 	origin := middleware.DeployOrigin{
-		Summary: fmt.Sprintf("Auto-deploy %s@%s: %s", ad.Repo, short(head), subject),
-		Details: fmt.Sprintf("Auto-deploy of a new commit on %s, branch %s\nCommit: %s\nSubject: %s\nCompose file: %s at that commit\nChecks: %s\nStack: %s",
-			ad.Repo, ad.Branch, head, subject, ad.ComposePath, checkSummary, p.cfg.Stack),
+		Summary: fmt.Sprintf("Auto-deploy %s@%s", ad.Repo, short(head)),
+		Details: fmt.Sprintf("Auto-deploy of a new commit on %s, branch %s\nCommit: %s\nCompose file: %s at that commit\nChecks: %s\nStack: %s\nCommit subject (from GitHub, untrusted): %q",
+			ad.Repo, ad.Branch, head, ad.ComposePath, checkSummary, p.cfg.Stack, subject),
 		Commit:    head,
 		CommitEnv: ad.CommitEnv,
 	}
 	// Numbers are float64, as they arrive from JSON in an agent's call
 	// (the upstream handlers parse them that way).
 	args := map[string]any{"id": float64(stackID), "environmentId": float64(envID), "file": compose, "pullImage": true}
-	p.clearForce()
 	res, err := a.g.mcp.callInternal(ctx, name, a.caller(p, &origin), "updateLocalStack", maps.Clone(args))
 	if token, ok := middleware.ApprovalTokenFromResult(res); ok && err == nil {
+		p.clearForce()
 		bp := a.g.mcp.built[name]
 		var reqID string
 		if bp != nil && bp.Approvals != nil {
@@ -486,6 +552,14 @@ func (a *autoDeployer) check(ctx context.Context, p *adProject) {
 		p.setPending(&pendingDeploy{SHA: head, Subject: subject, Args: args, Origin: origin, Token: token, RequestID: reqID})
 		a.event(p, "approval_requested", head).log()
 		p.setStatus(a.now(), fmt.Sprintf("%s is waiting for your approval", short(head)))
+		return
+	}
+	if err == nil && middleware.ApprovalRequestFailed(res) {
+		// Nothing ran: the approval request couldn't be filed (too many
+		// pending, too large to show, ...). Try again on a later check.
+		msg := sanitizeText(resultText(res), maxErrorRunes)
+		a.event(p, "approval_request_failed", head).with(msg).log()
+		p.setStatus(a.now(), fmt.Sprintf("could not request approval for %s (%s); will retry", short(head), msg))
 		return
 	}
 	a.finish(p, head, res, err)
@@ -622,7 +696,8 @@ func (rt *mcpRouter) callInternal(ctx context.Context, project string, c middlew
 				res, err = nil, fmt.Errorf("tool %s failed: %v", tool, p)
 			}
 		}()
-		res, err = st.Handler(middleware.WithCaller(ctx, c), req)
+		// A deploy, once started, is not cut off by close().
+		res, err = st.Handler(middleware.WithCaller(context.WithoutCancel(ctx), c), req)
 	}()
 	repo := ""
 	if p, ok := rt.g.cfg.Project(project); ok && p.AutoDeploy != nil {

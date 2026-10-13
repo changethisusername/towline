@@ -174,6 +174,10 @@ type AutoDeployRecord struct {
 	// Fingerprint is the auto-deploy config the record belongs to; a
 	// different config starts over from a new baseline.
 	Fingerprint string `json:"fingerprint"`
+	// RepoID is the repository's numeric GitHub id at baseline. A
+	// different id (the name now points at another repository) stops
+	// auto-deploy.
+	RepoID int64 `json:"repo_id,omitempty"`
 	// DeployedSHA is the last commit deployed, or the baseline.
 	DeployedSHA string `json:"deployed_sha,omitempty"`
 	// RejectedSHA was rejected (or its approval expired): not asked again.

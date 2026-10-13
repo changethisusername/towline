@@ -23,7 +23,8 @@ const (
 
 var deliveryIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 
-// handleGitHubHook receives GitHub push webhooks. A valid delivery only
+// handleGitHubHook receives GitHub webhooks (push, check_suite and status
+// events). A valid delivery only
 // nudges the auto-deploy watcher to look at GitHub now: nothing in the
 // payload (not even the pushed SHA) is used to decide what to deploy, so
 // the webhook carries no authority.
@@ -34,7 +35,9 @@ func (g *Gateway) handleGitHubHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := g.clientIP(r)
-	if !g.limiter.allow("hook:"+ip, limitHookPerIP, time.Minute) || !g.limiter.allow("hook", limitHookGlobal, time.Minute) {
+	// Only the per-IP bucket applies before the signature is checked, so
+	// unsigned junk can't use up the global bucket and lock GitHub out.
+	if !g.limiter.allow("hook:"+ip, limitHookPerIP, time.Minute) {
 		tooMany(w)
 		return
 	}
@@ -56,6 +59,10 @@ func (g *Gateway) handleGitHubHook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
+	if !g.limiter.allow("hook", limitHookGlobal, time.Minute) {
+		tooMany(w)
+		return
+	}
 	event := r.Header.Get("X-GitHub-Event")
 	delivery := r.Header.Get("X-GitHub-Delivery")
 	if !deliveryIDPattern.MatchString(delivery) {
@@ -67,20 +74,36 @@ func (g *Gateway) handleGitHubHook(w http.ResponseWriter, r *http.Request) {
 		ev.Str("type", "ping").Msg("")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
-	case "push":
-		var push struct {
+	case "push", "check_suite", "status":
+		var payload struct {
 			Ref        string `json:"ref"`
+			Action     string `json:"action"`
 			Repository struct {
 				FullName string `json:"full_name"`
 			} `json:"repository"`
 		}
-		if err := json.Unmarshal(body, &push); err != nil {
-			ev.Str("type", "push").Str("outcome", "invalid_payload").Msg("")
+		if err := json.Unmarshal(body, &payload); err != nil {
+			ev.Str("type", event).Str("outcome", "invalid_payload").Msg("")
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
-		matched := g.autodeploy.nudgeRepo(push.Repository.FullName, push.Ref)
-		ev.Str("type", "push").Int("matched", matched).Msg("")
+		matched := 0
+		switch event {
+		case "push":
+			if payload.Ref != "" {
+				matched = g.autodeploy.nudgeRepo(payload.Repository.FullName, payload.Ref)
+			}
+		case "check_suite":
+			// Checks finishing may make a waiting commit deployable.
+			// Which branch they ran on doesn't matter: the watcher reads
+			// its own branch's head and checks.
+			if payload.Action == "completed" {
+				matched = g.autodeploy.nudgeRepo(payload.Repository.FullName, "")
+			}
+		case "status":
+			matched = g.autodeploy.nudgeRepo(payload.Repository.FullName, "")
+		}
+		ev.Str("type", event).Int("matched", matched).Msg("")
 		writeJSON(w, http.StatusAccepted, map[string]int{"matched": matched})
 		return
 	}

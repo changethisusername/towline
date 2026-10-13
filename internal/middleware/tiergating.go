@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/changethisusername/towline/internal/approval"
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -113,7 +114,7 @@ func NewTierGating(tier Tier, gate *ApprovalGate, toolName string) MiddlewareFun
 
 			pending := gate.Store.Claim(token, args)
 			if pending == nil {
-				return mcp.NewToolResultError("Invalid, expired, or mismatched approval token (or one already in use by another call). The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
+				return mcp.NewToolResultError(msgInvalidToken + " (or one already in use by another call). The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
 			}
 			if pending.ToolName != toolName {
 				gate.Store.Release(token)
@@ -165,7 +166,7 @@ func agentConfirm(ctx context.Context, gate *ApprovalGate, toolName string, requ
 
 	pending := gate.Store.Validate(token, args)
 	if pending == nil {
-		return mcp.NewToolResultError("Invalid, expired, or mismatched approval token. The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
+		return mcp.NewToolResultError(msgInvalidToken + ". The arguments must match the original request. Request a new one by calling this tool without the approvalToken parameter."), nil
 	}
 	if pending.ToolName != toolName {
 		return mcp.NewToolResultError(fmt.Sprintf("Approval token was issued for %q, not %q. Request a new token for this tool.", pending.ToolName, toolName)), nil
@@ -181,13 +182,13 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 	token := gate.Store.RequestFor(toolName, caller, args)
 	pending := gate.Store.Peek(token, args)
 	if pending == nil {
-		return mcp.NewToolResultError("failed to record approval request"), nil
+		return mcp.NewToolResultError(msgRecordFailed), nil
 	}
 
 	description, err := describeArgs(args)
 	if err != nil {
 		gate.Store.Consume(token)
-		return mcp.NewToolResultErrorFromErr("failed to prepare approval request", err), nil
+		return mcp.NewToolResultErrorFromErr(msgPrepareFailed, err), nil
 	}
 	if o := callerOrigin(ctx); o != nil && o.Details != "" {
 		description = o.Details + "\n\nArguments:\n" + description
@@ -205,7 +206,7 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 
 	if err := gate.Approver.Submit(ctx, req); err != nil {
 		gate.Store.Consume(token)
-		return mcp.NewToolResultErrorFromErr("failed to submit approval request", err), nil
+		return mcp.NewToolResultErrorFromErr(msgSubmitFailed, err), nil
 	}
 
 	msg := fmt.Sprintf(
@@ -219,6 +220,40 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		)
 	}
 	return mcp.NewToolResultText(msg), nil
+}
+
+// Messages that in-process callers recognize (see ApprovalTokenInvalid and
+// ApprovalRequestFailed); keep them here so they can't drift.
+const (
+	msgInvalidToken  = "Invalid, expired, or mismatched approval token"
+	msgRecordFailed  = "failed to record approval request"
+	msgPrepareFailed = "failed to prepare approval request"
+	msgSubmitFailed  = "failed to submit approval request"
+)
+
+// ApprovalTokenInvalid reports whether a re-call was refused because its
+// approval token was invalid, expired or mismatched (nothing ran).
+func ApprovalTokenInvalid(res *mcp.CallToolResult) bool {
+	return res != nil && res.IsError && strings.HasPrefix(firstText(res), msgInvalidToken)
+}
+
+// ApprovalRequestFailed reports whether a first call needed approval but
+// the request could not be recorded, prepared or submitted (nothing ran).
+func ApprovalRequestFailed(res *mcp.CallToolResult) bool {
+	if res == nil || !res.IsError {
+		return false
+	}
+	t := firstText(res)
+	return strings.HasPrefix(t, msgRecordFailed) || strings.HasPrefix(t, msgPrepareFailed) || strings.HasPrefix(t, msgSubmitFailed)
+}
+
+func firstText(res *mcp.CallToolResult) string {
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			return tc.Text
+		}
+	}
+	return ""
 }
 
 // approvalTokenPattern finds the token in the messages above (both the

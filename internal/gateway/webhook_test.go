@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -18,9 +19,13 @@ func sign(secret, body string) string {
 }
 
 func (h *adHarness) hook(event, body, signature string) *httptest.ResponseRecorder {
+	return h.hookFrom("203.0.113.7", event, body, signature)
+}
+
+func (h *adHarness) hookFrom(ip, event, body, signature string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "http://127.0.0.1:9/hooks/github", strings.NewReader(body))
 	req.Host = "127.0.0.1:9"
-	req.RemoteAddr = "203.0.113.7:4444"
+	req.RemoteAddr = ip + ":4444"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-GitHub-Delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958")
@@ -69,6 +74,13 @@ func TestGitHubWebhook(t *testing.T) {
 		{"other repo", "push", push("evil/shop", "refs/heads/main"), "", 202, false},
 		{"ping", "ping", `{"zen":"x"}`, "", 200, false},
 		{"other event", "issues", `{}`, "", 202, false},
+		{"push without ref", "push", `{"repository":{"full_name":"acme/shop"}}`, "", 202, false},
+		{"check suite completed", "check_suite", `{"action":"completed","repository":{"full_name":"acme/shop"}}`, "", 202, true},
+		{"check suite on another branch", "check_suite", `{"action":"completed","check_suite":{"head_branch":"feature"},"repository":{"full_name":"acme/shop"}}`, "", 202, true},
+		{"check suite requested", "check_suite", `{"action":"requested","repository":{"full_name":"acme/shop"}}`, "", 202, false},
+		{"check suite other repo", "check_suite", `{"action":"completed","repository":{"full_name":"evil/shop"}}`, "", 202, false},
+		{"status", "status", `{"state":"success","sha":"` + shaC + `","repository":{"full_name":"acme/shop"}}`, "", 202, true},
+		{"status other repo", "status", `{"state":"success","repository":{"full_name":"evil/shop"}}`, "", 202, false},
 		{"bad signature", "push", body, sign("wrong-secret-0123456789abcdef0123", body), 401, false},
 		{"missing signature", "push", body, "-", 401, false},
 		{"sha1 signature", "push", body, "sha1=" + strings.Repeat("0", 40), 401, false},
@@ -133,5 +145,21 @@ func TestGitHubWebhookWithoutAutoDeploy(t *testing.T) {
 	tg.Handler().ServeHTTP(rr, req)
 	if rr.Code != 202 || !strings.Contains(rr.Body.String(), `"matched":0`) {
 		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Unsigned deliveries only use up their own address's bucket, never the
+// global one GitHub's signed deliveries need.
+func TestGitHubWebhookUnsignedDontExhaustGlobalLimit(t *testing.T) {
+	h := newAutoDeployHarness(t, startedRepo(t), t.TempDir(), ApprovalProd, nil)
+	h.cfg.GitHub.WebhookSecret = testHookSecret
+	body := `{"zen":"x"}`
+	for ip := 0; ip < 6; ip++ {
+		for i := 0; i < limitHookPerIP; i++ {
+			h.hookFrom(fmt.Sprintf("198.51.100.%d", ip), "ping", body, "sha256=00")
+		}
+	}
+	if rr := h.hookFrom("192.0.2.1", "ping", body, sign(testHookSecret, body)); rr.Code != 200 {
+		t.Fatalf("signed delivery after %d unsigned ones: %d", 6*limitHookPerIP, rr.Code)
 	}
 }

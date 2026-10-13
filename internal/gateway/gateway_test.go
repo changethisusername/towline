@@ -765,7 +765,7 @@ func TestConfigValidation(t *testing.T) {
 	if ad.Branch != "main" || ad.ComposePath != "docker-compose.yml" || ad.RequireChecks == nil || !*ad.RequireChecks {
 		t.Fatalf("auto-deploy defaults not applied: %+v", ad)
 	}
-	if ad.Fingerprint() != "acme/shop|main|docker-compose.yml|true|" {
+	if ad.Fingerprint() != "acme/shop|main|docker-compose.yml" {
 		t.Fatalf("fingerprint %q", ad.Fingerprint())
 	}
 
