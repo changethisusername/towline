@@ -893,7 +893,7 @@ func TestPrepareStackUpdate(t *testing.T) {
 	cli.On("GetLocalStackFile", testStackID).Return("services:\n  web:\n    image: nginx:1\n", nil)
 
 	h := setupHandlers(t, cli, nil)
-	userEnv, internalEnv, err := h.PrepareStackUpdate("services:\n  web:\n    image: nginx:2\n")
+	userEnv, internalEnv, err := h.PrepareStackUpdate("services:\n  web:\n    image: nginx:2\n", "")
 	require.NoError(t, err)
 
 	assert.Equal(t, []models.LocalStackEnvVar{{Name: "USER_VAR", Value: "x"}}, userEnv)

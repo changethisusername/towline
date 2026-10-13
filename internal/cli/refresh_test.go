@@ -379,3 +379,32 @@ func TestCarryOver_FlagForms(t *testing.T) {
 		})
 	}
 }
+
+func TestRefresh_KeepsAutoDeploy(t *testing.T) {
+	f := newFakePortainer()
+	f.teams[7] = "team-shop-prod"
+	f.stacks[11] = config.StackInfo{ID: 11, Name: "shop-prod", EndpointID: 1}
+	f.stackFiles = map[int]string{11: "services:\n  web:\n    image: nginx\n"}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+
+	dir := setupLegacyProject(t, srv.URL, config.GlobalConfig{})
+	raw, err := os.ReadFile(filepath.Join(dir, "towline.json"))
+	require.NoError(t, err)
+	var pc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &pc))
+	pc["auto_deploy"] = map[string]any{"repo": "acme/shop", "branch": "release", "require_checks": false, "commit_env": "GIT_SHA"}
+	raw, _ = json.Marshal(pc)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "towline.json"), raw, 0600))
+
+	require.NoError(t, runRefresh([]string{"shop"}))
+
+	got, err := config.LoadProjectConfig(dir)
+	require.NoError(t, err)
+	require.NotNil(t, got.AutoDeploy)
+	assert.Equal(t, "acme/shop", got.AutoDeploy.Repo)
+	assert.Equal(t, "release", got.AutoDeploy.Branch)
+	require.NotNil(t, got.AutoDeploy.RequireChecks)
+	assert.False(t, *got.AutoDeploy.RequireChecks)
+	assert.Equal(t, "GIT_SHA", got.AutoDeploy.CommitEnv)
+}

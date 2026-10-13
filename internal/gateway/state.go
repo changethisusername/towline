@@ -163,6 +163,25 @@ type stateFile struct {
 	Connections   []*Connection          `json:"connections"`
 	AccessTokens  map[string]*oauthToken `json:"access_tokens"`
 	RefreshTokens map[string]*oauthToken `json:"refresh_tokens"`
+	// AutoDeploy is each project's auto-deploy progress (additive: older
+	// gateways ignore it).
+	AutoDeploy map[string]*AutoDeployRecord `json:"auto_deploy,omitempty"`
+}
+
+// AutoDeployRecord is what the auto-deploy watcher remembers about a
+// project across restarts.
+type AutoDeployRecord struct {
+	// Fingerprint is the auto-deploy config the record belongs to; a
+	// different config starts over from a new baseline.
+	Fingerprint string `json:"fingerprint"`
+	// DeployedSHA is the last commit deployed, or the baseline.
+	DeployedSHA string `json:"deployed_sha,omitempty"`
+	// RejectedSHA was rejected (or its approval expired): not asked again.
+	RejectedSHA string `json:"rejected_sha,omitempty"`
+	// FailedSHA failed to deploy: not retried automatically.
+	FailedSHA  string    `json:"failed_sha,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+	DeployedAt time.Time `json:"deployed_at,omitzero"`
 }
 
 // Store holds connections and OAuth state, persisted to a JSON file
@@ -190,6 +209,8 @@ type Store struct {
 
 	pairings map[string]*Pairing       // by id
 	pending  map[string]*pendingClient // by client id
+
+	autodeploy map[string]*AutoDeployRecord // by project
 }
 
 // OpenStore loads the store from path, creating it if missing.
@@ -206,6 +227,8 @@ func OpenStore(path string) (*Store, error) {
 
 		pairings: map[string]*Pairing{},
 		pending:  map[string]*pendingClient{},
+
+		autodeploy: map[string]*AutoDeployRecord{},
 	}
 	if path == "" {
 		return s, nil
@@ -241,6 +264,11 @@ func OpenStore(path string) (*Store, error) {
 	for h, t := range f.RefreshTokens {
 		if t != nil && s.conns[t.ConnectionID] != nil {
 			s.refresh[h] = t
+		}
+	}
+	for p, r := range f.AutoDeploy {
+		if r != nil && ValidProjectName(p) {
+			s.autodeploy[p] = r
 		}
 	}
 	return s, nil
@@ -288,6 +316,9 @@ func (s *Store) unlock() {
 func (s *Store) snapshotLocked() ([]byte, error) {
 	s.pruneLocked()
 	f := stateFile{Version: 1, AccessTokens: s.access, RefreshTokens: s.refresh}
+	if len(s.autodeploy) > 0 {
+		f.AutoDeploy = s.autodeploy
+	}
 	for _, c := range s.conns {
 		f.Connections = append(f.Connections, c)
 	}
@@ -549,6 +580,44 @@ func (s *Store) DropProjectsExcept(keep []string) error {
 		}
 	}
 	return nil
+}
+
+// AutoDeployRecord returns a project's auto-deploy record (a copy).
+func (s *Store) AutoDeployRecord(project string) (AutoDeployRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.autodeploy[project]
+	if !ok {
+		return AutoDeployRecord{}, false
+	}
+	return *r, true
+}
+
+// SetAutoDeployRecord saves a project's auto-deploy record.
+func (s *Store) SetAutoDeployRecord(project string, r AutoDeployRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.autodeploy[project] = &r
+	return s.saveLocked()
+}
+
+// PruneAutoDeploy forgets the records of projects not in keep (auto-deploy
+// turned off, or the project removed), so turning it on again starts from
+// a new baseline.
+func (s *Store) PruneAutoDeploy(keep []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for p := range s.autodeploy {
+		if !slices.Contains(keep, p) {
+			delete(s.autodeploy, p)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
 }
 
 // Connections lists connections, oldest first (copies).

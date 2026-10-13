@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/changethisusername/towline/internal/approval"
 	"github.com/changethisusername/towline/pkg/toolgen"
@@ -188,6 +189,9 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		gate.Store.Consume(token)
 		return mcp.NewToolResultErrorFromErr("failed to prepare approval request", err), nil
 	}
+	if o := callerOrigin(ctx); o != nil && o.Details != "" {
+		description = o.Details + "\n\nArguments:\n" + description
+	}
 	req := approval.Request{
 		ID:          pending.RequestID,
 		Project:     gate.Project,
@@ -215,6 +219,29 @@ func requestApproval(ctx context.Context, gate *ApprovalGate, toolName string, a
 		)
 	}
 	return mcp.NewToolResultText(msg), nil
+}
+
+// approvalTokenPattern finds the token in the messages above (both the
+// first-call and the still-pending variants quote it the same way).
+var approvalTokenPattern = regexp.MustCompile(`approvalToken: "([0-9a-f]{32})"`)
+
+// ApprovalTokenFromResult extracts the approval token from a gated tool's
+// non-error result, for in-process callers (the gateway's auto-deploy
+// watcher) that follow the same flow as an agent.
+func ApprovalTokenFromResult(res *mcp.CallToolResult) (string, bool) {
+	if res == nil || res.IsError {
+		return "", false
+	}
+	for _, c := range res.Content {
+		tc, ok := c.(mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if m := approvalTokenPattern.FindStringSubmatch(tc.Text); m != nil {
+			return m[1], true
+		}
+	}
+	return "", false
 }
 
 // shortRequestID is the prefix of a request ID the approver sees in the UI,

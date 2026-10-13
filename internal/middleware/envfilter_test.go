@@ -27,7 +27,7 @@ func envNames(env []interface{}) []string {
 }
 
 func TestEnvFilter(t *testing.T) {
-	prepare := func(newCompose string) ([]models.LocalStackEnvVar, []models.LocalStackEnvVar, error) {
+	prepare := func(newCompose, _ string) ([]models.LocalStackEnvVar, []models.LocalStackEnvVar, error) {
 		assert.Equal(t, "services: {}\n", newCompose)
 		return []models.LocalStackEnvVar{{Name: "EXISTING", Value: "1"}},
 			[]models.LocalStackEnvVar{{Name: "_TOWLINE_DEPLOYMENTS", Value: "[...]"}}, nil
@@ -91,7 +91,7 @@ func TestEnvFilter(t *testing.T) {
 }
 
 func TestEnvFilter_PrepareErrorFailsUpdate(t *testing.T) {
-	prepare := func(string) ([]models.LocalStackEnvVar, []models.LocalStackEnvVar, error) {
+	prepare := func(string, string) ([]models.LocalStackEnvVar, []models.LocalStackEnvVar, error) {
 		return nil, nil, errors.New("boom")
 	}
 	called := false
