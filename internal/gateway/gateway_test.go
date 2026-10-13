@@ -22,6 +22,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 )
 
 const testOwnerToken = "owner-token-for-tests-0123456789abcdef0123456789abcdef"
@@ -702,6 +703,41 @@ func TestConfigValidation(t *testing.T) {
 		{"duplicate", func(c *Config) { c.Projects = append(c.Projects, c.Projects[0]) }, false},
 		{"bad approval", func(c *Config) { c.Projects[0].Approval = "agent" }, false},
 		{"no projects", func(c *Config) { c.Projects = nil }, false},
+		{"auto-deploy", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "acme/shop"} }, true},
+		{"auto-deploy full", func(c *Config) {
+			c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "Acme-1/shop.web_2", Branch: "release/v1.2", ComposePath: "deploy/prod/compose.yaml", CommitEnv: "GIT_SHA"}
+		}, true},
+		{"repo without owner", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "shop"} }, false},
+		{"repo with three parts", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b/c"} }, false},
+		{"repo dotdot", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "acme/.."} }, false},
+		{"repo url", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "https://github.com/acme/shop"} }, false},
+		{"repo query", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "acme/shop?x=1"} }, false},
+		{"branch dotdot", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "main..x"} }, false},
+		{"branch dash", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "-x"} }, false},
+		{"branch slash", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "/main"} }, false},
+		{"branch trailing slash", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "main/"} }, false},
+		{"branch double slash", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "a//b"} }, false},
+		{"branch lock", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "main.lock"} }, false},
+		{"branch refs", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "refs/heads/main"} }, false},
+		{"branch space", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", Branch: "ma in"} }, false},
+		{"path traversal", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "../x.yml"} }, false},
+		{"path dot segment", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "./x.yml"} }, false},
+		{"path absolute", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "/abs.yml"} }, false},
+		{"path not yaml", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "x.txt"} }, false},
+		{"path empty segment", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "a//x.yml"} }, false},
+		{"path query", func(c *Config) {
+			c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: "x.yml?ref=evil"}
+		}, false},
+		{"path too long", func(c *Config) {
+			c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", ComposePath: strings.Repeat("a", 200) + ".yml"}
+		}, false},
+		{"commit env internal", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", CommitEnv: "_TOWLINE_X"} }, false},
+		{"commit env lower", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", CommitEnv: "git_sha"} }, false},
+		{"commit env leading underscore", func(c *Config) { c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "a/b", CommitEnv: "_SHA"} }, false},
+		{"webhook secret", func(c *Config) { c.GitHub.WebhookSecret = strings.Repeat("s", 32) }, true},
+		{"short webhook secret", func(c *Config) { c.GitHub.WebhookSecret = "short" }, false},
+		{"github token", func(c *Config) { c.GitHub.Token = "github_pat_11ABC_def" }, true},
+		{"github token with newline", func(c *Config) { c.GitHub.Token = "ghp_x\nInjected: 1" }, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -717,6 +753,68 @@ func TestConfigValidation(t *testing.T) {
 	_ = c.Validate()
 	if c.Projects[0].Approval != ApprovalAlways || c.Projects[0].Stack != "shop-dev" {
 		t.Fatalf("defaults not applied: %+v", c.Projects[0])
+	}
+
+	// Auto-deploy defaults.
+	c = base()
+	c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "acme/shop"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ad := c.Projects[0].AutoDeploy
+	if ad.Branch != "main" || ad.ComposePath != "docker-compose.yml" || ad.RequireChecks == nil || !*ad.RequireChecks {
+		t.Fatalf("auto-deploy defaults not applied: %+v", ad)
+	}
+	if ad.Fingerprint() != "acme/shop|main|docker-compose.yml" {
+		t.Fatalf("fingerprint %q", ad.Fingerprint())
+	}
+
+	// A bad token is never echoed.
+	c = base()
+	c.GitHub.Token = "ghp_secret-with-dash"
+	if err := c.Validate(); err == nil || strings.Contains(err.Error(), "ghp_secret") {
+		t.Fatalf("token validation: %v", err)
+	}
+}
+
+// Configs without auto-deploy marshal exactly as before, so existing
+// deployments and older gateway images are unaffected.
+func TestConfigYAMLUnchangedWithoutAutoDeploy(t *testing.T) {
+	c := Config{
+		PublicURL:      "https://mcp.example.com",
+		Listen:         ":8080",
+		DataDir:        "/data",
+		OwnerTokenHash: approval.HashToken("x"),
+		Portainer:      PortainerConfig{URL: "https://p:9443"},
+		Projects:       []ProjectConfig{{Name: "shop-dev", Stack: "shop-dev", Tier: "dev", Token: "t", Approval: ApprovalAlways}},
+	}
+	out, err := yaml.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"github", "auto_deploy", "webhook", "token: \"\""} {
+		if strings.Contains(string(out), key) {
+			t.Fatalf("unexpected %q in:\n%s", key, out)
+		}
+	}
+	back, err := ParseConfig(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := yaml.Marshal(back)
+	if string(again) != string(out) {
+		t.Fatalf("round trip changed the config:\n%s\n---\n%s", out, again)
+	}
+
+	c.GitHub = GitHubConfig{Token: "ghp_abc", WebhookSecret: strings.Repeat("s", 32)}
+	c.Projects[0].AutoDeploy = &AutoDeployConfig{Repo: "acme/shop"}
+	out, _ = yaml.Marshal(c)
+	back, err = ParseConfig(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.GitHub.Token != "ghp_abc" || back.Projects[0].AutoDeploy.Repo != "acme/shop" {
+		t.Fatalf("round trip lost auto-deploy: %+v", back)
 	}
 }
 

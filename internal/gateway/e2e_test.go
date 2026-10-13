@@ -272,3 +272,80 @@ func TestEndToEndHTTPHeaders(t *testing.T) {
 		t.Fatalf("ui headers: %v", resp.Header)
 	}
 }
+
+// TestEndToEndAutoDeploy runs the watcher against the real project build
+// (the same middleware chain as remote clients) and a mock Portainer.
+func TestEndToEndAutoDeploy(t *testing.T) {
+	mp := &mockPortainer{files: map[int]string{1: composeA, 2: "services:\n  api:\n    image: api:1\n"}}
+	var putMu sync.Mutex
+	var puts []map[string]any
+	portainer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			putMu.Lock()
+			puts = append(puts, body)
+			putMu.Unlock()
+			r.Body = io.NopCloser(strings.NewReader(string(raw)))
+		}
+		mp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(portainer.Close)
+
+	gh := startedRepo(t)
+	cfg := &Config{
+		PublicURL:      "http://127.0.0.1:9",
+		DataDir:        t.TempDir(),
+		OwnerTokenHash: approval.HashToken(testOwnerToken),
+		Portainer:      PortainerConfig{URL: portainer.URL},
+		Projects: []ProjectConfig{
+			{Name: "alpha-dev", Tier: "dev", Token: "tok-alpha", Approval: ApprovalProd,
+				AutoDeploy: &AutoDeployConfig{Repo: "acme/shop", CommitEnv: "GIT_SHA"}},
+			{Name: "beta-prod", Tier: "prod", Token: "tok-beta"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	audit := zerolog.Nop()
+	g, err := New(cfg, Options{Audit: &audit, github: gh.client(""), manualAutoDeploy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.Close)
+	g.autodeploy.settle = 0
+	p := g.autodeploy.projects["alpha-dev"]
+	ctx := context.Background()
+
+	g.autodeploy.check(ctx, p) // baseline
+	if mp.count("tok-alpha PUT") != 0 {
+		t.Fatal("baseline deployed")
+	}
+	gh.setHead("acme/shop", "main", shaB)
+	g.autodeploy.check(ctx, p)
+	if mp.count("tok-alpha PUT /api/stacks/1") != 1 || mp.file(1) != composeB {
+		rec, _ := g.store.AutoDeployRecord("alpha-dev")
+		t.Fatalf("auto-deploy did not reach Portainer: %v (%s: %s)", mp.requests, p.status, rec.LastError)
+	}
+	if mp.count("tok-beta PUT") != 0 || mp.count(" POST ") != 0 {
+		t.Fatalf("unexpected Portainer calls: %v", mp.requests)
+	}
+	putMu.Lock()
+	body := puts[0]
+	putMu.Unlock()
+	env := map[string]string{}
+	for _, e := range body["env"].([]any) {
+		m := e.(map[string]any)
+		env[m["name"].(string)], _ = m["value"].(string)
+	}
+	if env["GIT_SHA"] != shaB {
+		t.Fatalf("commit env: %v", env)
+	}
+	if !strings.Contains(env["_TOWLINE_DEPLOYMENTS"], `"description":"Auto-deploy acme/shop@bbbbbbb"`) || strings.Contains(env["_TOWLINE_DEPLOYMENTS"], "feat: nginx 2") {
+		t.Fatalf("deployment history: %s", env["_TOWLINE_DEPLOYMENTS"])
+	}
+	if body["pullImage"] != true {
+		t.Fatalf("pullImage not set: %v", body)
+	}
+}

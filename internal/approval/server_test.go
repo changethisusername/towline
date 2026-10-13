@@ -253,3 +253,34 @@ func readBody(t *testing.T, resp *http.Response) string {
 	require.NoError(t, err)
 	return string(b)
 }
+
+func TestServer_Withdraw(t *testing.T) {
+	s, ts := newTestServer(t)
+	ctx := context.Background()
+	require.NoError(t, s.Submit(ctx, Request{ID: "req-w", Project: "p", Action: "updateLocalStack", Client: "autodeploy:p"}))
+
+	require.NoError(t, s.Withdraw("req-w"))
+	st, err := s.Status(ctx, "req-w")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRejected, st, "a withdrawn request reads as rejected")
+
+	// The webhook API reports it as rejected too.
+	resp := do(t, "GET", ts.URL+"/req-w", testWebhookToken, "")
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	assert.Equal(t, "rejected", body["status"])
+
+	// It can't be approved or withdrawn again, and the UI shows why.
+	assert.Error(t, s.Decide("req-w", StatusApproved))
+	assert.Error(t, s.Withdraw("req-w"))
+	assert.Error(t, s.Withdraw("unknown"))
+	recs := s.Records()
+	require.Len(t, recs, 1)
+	assert.Equal(t, StatusWithdrawn, recs[0].Status)
+	assert.False(t, recs[0].DecidedAt.IsZero())
+
+	// A decided request can't be withdrawn.
+	require.NoError(t, s.Submit(ctx, Request{ID: "req-a", Project: "p", Action: "x"}))
+	require.NoError(t, s.Decide("req-a", StatusApproved))
+	assert.Error(t, s.Withdraw("req-a"))
+}

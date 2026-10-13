@@ -86,6 +86,82 @@ Approval tokens are bound to the connection that asked, the tool and the exact a
 
 `towline remote setup --approval prod` limits approvals to prod projects, so dev projects run changes immediately. Prod projects always need approval through the gateway; agent self-confirmation is never used remotely.
 
+## 5. Auto-deploy on merge
+
+The gateway can watch a GitHub branch and deploy each new commit's compose file to a project's existing stack. Merge a pull request, and the stack follows, with your approval on the gateway page by default.
+
+Add an `auto_deploy` block to the project's `towline.json`:
+
+```json
+"auto_deploy": {
+  "repo": "acme/shop",
+  "branch": "main",
+  "compose_path": "docker-compose.yml",
+  "require_checks": true,
+  "commit_env": "GIT_SHA"
+}
+```
+
+Only `repo` is required. `branch` defaults to `main`, `compose_path` to `docker-compose.yml`, and `require_checks` to `true`. `commit_env` is optional: it sets that stack env var to the deployed commit SHA, so the compose file can pin `image: ghcr.io/acme/shop:${GIT_SHA}`.
+
+`towline.json` is writable by the project's agent, so the gateway doesn't trust a new or changed block on its own. Accept it on your machine, naming the projects (directory or stack name, comma-separated):
+
+```bash
+towline remote deploy --accept-auto-deploy shop
+```
+
+Only the named projects are accepted; another project's new or changed block stays off with a notice. `--accept-auto-deploy` with no names deploys nothing and lists the blocks waiting for acceptance, showing what you accepted before and what the block says now.
+
+The CLI remembers what you accepted in `~/.towline/remote.yaml`. The acceptance covers every field of the block and the project's `compose_policy` (also copied from `towline.json`). If any of them changes, auto-deploy for that project stays off at the next deploy, and the CLI tells you to accept it again. An invalid block is ignored with a notice ("invalid, ignored: ..."), so it can't break other `towline remote` commands; it is an error only when you try to accept it. Each deploy prints what auto-deploy will do and warns about settings that skip your approval or the checks.
+
+### GitHub access
+
+Public repositories work without a token, but GitHub allows only 60 unauthenticated requests an hour, so the gateway checks every 5 minutes. A token raises the limit (checks every minute) and is needed for private repositories:
+
+```bash
+# A fine-grained token, read-only: Contents, Commit statuses, Checks and Metadata.
+towline remote github --token-stdin < token.txt
+```
+
+The token is read from stdin so it never shows up in shell history or `ps`; run it without a redirect to paste the token, then press Ctrl-D. `--clear-token` removes it.
+
+So that the gateway checks GitHub as soon as something happens instead of at its next poll, add a webhook:
+
+```bash
+towline remote github --webhook
+```
+
+This prints a secret once. In the repository, open **Settings → Webhooks → Add webhook** and set:
+
+- Payload URL: `https://mcp.example.com/hooks/github`
+- Content type: `application/json`
+- Secret: the printed secret
+- Events: **Let me select individual events**, then **Pushes**, **Check suites** and **Statuses**
+
+A push wakes the watcher for the pushed branch; a completed check suite or a status update wakes it for the repository, since that is often what makes a waiting commit deployable. With required checks, the deploy still waits for the checks and the 2-minute settle window below, so expect it a little after CI finishes rather than instantly.
+
+If Cloudflare challenges or blocks automated requests (see step 1), let `/hooks/github` through as well. `--clear-webhook` turns the webhook off. Both commands redeploy the gateway.
+
+### How it behaves
+
+- **A new baseline.** The current head counts as deployed, and nothing runs, exactly when:
+  - auto-deploy is turned on for the project (including turning it off, deploying, and on again),
+  - `repo`, `branch` or `compose_path` changes, or
+  - the gateway's `gateway-data` volume (its state) is lost.
+
+  Changing `require_checks`, `commit_env`, the compose policy or the approval policy doesn't reset the baseline (they still need your acceptance). The next new commit after a baseline deploys. Use **Deploy latest now** on the gateway page to deploy the current head anyway.
+- **The repository is pinned by id.** The baseline records the repository's numeric GitHub id. If the name later points at a different repository (deleted and recreated, or transferred away and replaced), auto-deploy stops and says so on the page. If that is expected, turn auto-deploy off and on again.
+- **Checks.** With `require_checks`, a commit deploys only when all its check runs passed (success, neutral or skipped) and any commit statuses are green. A commit with no checks at all waits, so `require_checks` needs CI on the branch. The commit must also have been the branch head for 2 minutes, so checks that register late aren't missed.
+- **Approvals.** The deploy goes through the project's own `updateLocalStack`, with the same compose policy, approval gating, stack scoping and env handling as an app's call. It shows up under **Waiting for your approval** as asked by "auto-deploy (acme/shop)", with the repo, branch, full SHA and check summary, and last the commit subject, marked as untrusted text from GitHub. If the branch has moved on by the time you approve, the approved commit is not deployed; the newer one is asked for instead. With `--approval prod`, dev projects deploy merges without asking you.
+- **Superseding.** If a newer commit lands while one is waiting, the old request is marked superseded and can no longer be approved; the newer commit is asked for instead.
+- **Rejected or failed commits** are not asked for or retried again. A rejected request, or one nobody decided within 30 minutes, waits for the next commit; so does a rejection after **Deploy latest now**. A deploy that fails, including a compose file the policy refuses, is recorded on the page with its error. **Deploy latest now** clears both and tries the current head again. If an approval was granted but its token expired before the gateway used it, or the approval request couldn't be filed (for example too many pending), nothing is marked failed: the gateway asks again on a later check.
+- **It never creates stacks.** If the project's stack doesn't exist, auto-deploy waits and says so. Create the stack first.
+- **Merges and direct pushes look the same.** The gateway sees only the branch head. Protect the branch on GitHub (pull requests and status checks required) so only reviewed code reaches it.
+
+Every step is in the audit log as `"event":"autodeploy"`, and each deploy as a `tool_call` with `"source":"auto-deploy"` and the commit SHA. The deployment history (`towline_deployments`) shows `Auto-deploy acme/shop@<short sha>`; the commit subject is left out because agents read that history.
+
+The gateway image and CLI move together. An older gateway image refuses a configuration with auto-deploy settings, so after `towline update`, run `towline remote deploy` before turning auto-deploy on.
+
 ## Managing it
 
 ```bash
@@ -94,6 +170,8 @@ towline remote add api         # serve another project (redeploys)
 towline remote remove blog     # stop serving a project (redeploys)
 towline remote deploy          # redeploy, e.g. after changing a project's key or compose_policy
 towline remote owner-token     # issue a new owner token (redeploys)
+towline remote deploy --accept-auto-deploy shop   # accept these projects' auto_deploy blocks as they are now
+towline remote github --token-stdin | --webhook   # GitHub token and webhook for auto-deploy (redeploys)
 ```
 
 The gateway image follows your CLI version. After `towline update`, run `towline remote deploy` to move the gateway to the new release.
@@ -109,4 +187,5 @@ Connections and OAuth grants live in the gateway's `gateway-data` volume and sur
 - **Credentials.** Secrets are shown once and stored only as SHA-256 hashes. Every credential kind has its own prefix (`twl_ct_` header token, `twl_cs_` client secret, `twl_at_`/`twl_rt_` OAuth tokens), and each is accepted only where it belongs. Access tokens last 1 hour. A token issued for `/mcp` works there and on `/p/<project>/mcp` for the connection's own projects; a token issued for one project's URL works only there. Refresh tokens last 30 days.
 - **Registration** of new apps is only open while you have a sign-in window open. A registered app gets nothing until you approve it with the owner token.
 - **The container** runs as a non-root user on a read-only filesystem with all capabilities dropped and no published port; only `cloudflared` talks to the outside.
+- **Auto-deploy.** GitHub never gets Portainer credentials, and the gateway only reads from GitHub with an optional read-only token. Everything GitHub returns is treated as untrusted: SHAs are validated, sizes capped, redirects refused, and commit subjects stripped of control and formatting characters. The webhook only makes the gateway look sooner (unsigned deliveries count only against their sender's rate limit); its payload never chooses what to deploy, so the gateway only reads the configured repository's branch and never a fork's commits. Deploys run as the watcher's own identity, which can only list the project's stack and update it, through the full middleware chain.
 - **Host checks.** Requests must be addressed to your public hostname, and browser requests from other origins are refused. That includes MCP calls from browser-based tools such as MCP Inspector in browser mode. Use the header-token method from a non-browser client instead.

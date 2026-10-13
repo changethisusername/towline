@@ -79,7 +79,7 @@ label { display:block; margin:10px 0 4px; font-weight:600; }
 .choice input { margin-top:4px; }
 .msg { padding:10px 12px; border-radius:8px; border:1px solid var(--no); color:var(--no); margin:12px 0; }
 .warn { padding:10px 12px; border-radius:8px; border:1px solid var(--warn); color:var(--warn); margin:12px 0; }
-.status-approved { color:var(--ok); } .status-rejected, .status-expired { color:var(--no); }
+.status-approved { color:var(--ok); } .status-rejected, .status-expired { color:var(--no); } .status-superseded { color:var(--muted); }
 header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
 table { width:100%; border-collapse:collapse; } td, th { text-align:left; padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; font-size:14px; }
 </style>
@@ -168,6 +168,16 @@ table { width:100%; border-collapse:collapse; } td, th { text-align:left; paddin
 <form method="post" action="/ui/connections/revoke" class="actions"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="danger">Revoke</button></form>
 </div>
 {{else}}<div class="card meta">No connections yet.</div>{{end}}
+
+{{if .AutoDeploy}}<h2>Auto-deploy</h2>
+{{range .AutoDeploy}}<div class="card">
+<div><strong>{{.Project}}</strong> <span class="meta">· <code>{{.Repo}}@{{.Branch}}:{{.Path}}</code> · {{if .ChecksRequired}}checks required{{else}}checks not required{{end}} · {{if eq .Approval "always"}}each deploy needs your approval{{else}}approval on prod only{{end}}</span></div>
+<div class="meta">Deployed: {{with .Deployed}}<code>{{.}}</code>{{else}}nothing yet{{end}}{{if not .DeployedAt.IsZero}} · {{ago .DeployedAt}}{{end}}</div>
+<div>{{.State}}</div>
+{{with .LastError}}<div class="warn">Last error: {{.}}</div>{{end}}
+<form method="post" action="/ui/autodeploy" class="actions"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.Project}}"><button>Deploy latest now</button></form>
+</div>{{end}}
+{{end}}
 
 <h2>Projects</h2>
 <div class="card"><table>

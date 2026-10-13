@@ -499,6 +499,16 @@ towline remote setup --url https://mcp.example.com --all   # or name projects: s
 
 Changes made through the gateway (deploys, configuration, exec, destructive actions) wait for your approval under **Waiting for your approval** on the same page, on dev projects too unless you pass `--approval prod`. The gateway holds each project's own team-scoped key, never the admin key. You can put Cloudflare Access in front of `/ui` and `/oauth/authorize` only; apps call the other paths from their servers.
 
+### Auto-deploy on merge
+
+The gateway can deploy each new commit on a GitHub branch to a project's existing stack. Add a block to the project's `towline.json`:
+
+```json
+"auto_deploy": { "repo": "acme/shop", "branch": "main", "compose_path": "docker-compose.yml" }
+```
+
+Then accept it with `towline remote deploy --accept-auto-deploy <project>`. The agent can edit `towline.json`, so a new or changed block, or a changed `compose_policy`, stays off until you accept that project; an invalid block is ignored with a notice. Deploys wait for the commit's checks to pass and, by default, for your approval on the gateway page. The first enable only records the current commit; the next merge deploys. `towline remote github --token-stdin` adds a read-only GitHub token (private repositories, faster polling), and `towline remote github --webhook` sets up a webhook (pushes, check suites and statuses) so the gateway checks GitHub as soon as something changes instead of at its next poll. Details are in [remote-gateway.md](remote-gateway.md#5-auto-deploy-on-merge).
+
 Cloudflare settings, the three connection methods, URLs and the security model are in [remote-gateway.md](remote-gateway.md).
 
 ---
@@ -730,9 +740,10 @@ approval:
 | `towline approvals list \| show <id> \| approve <id> \| reject <id>` | Decide approval requests from the terminal (prompts for the approver token). |
 | `towline remote setup --url <url> [--all \| <name>...]` | Deploy the remote gateway. See [Remote gateway](#remote-gateway). |
 | `towline remote add \| remove <name>...` | Serve another project remotely, or stop serving one (redeploys). |
-| `towline remote deploy` | Redeploy the gateway, e.g. after `towline update` or a change to a project's key or `compose_policy`. |
+| `towline remote deploy [--accept-auto-deploy <project>[,<project>...]]` | Redeploy the gateway, e.g. after `towline update` or a change to a project's key or `compose_policy`. `--accept-auto-deploy` accepts the named projects' `auto_deploy` blocks as they are now; with no names it lists the blocks waiting for acceptance. |
 | `towline remote status` | Show the gateway configuration and check its health. |
 | `towline remote owner-token` | Issue a new owner token for the gateway page (redeploys). |
+| `towline remote github [--token-stdin \| --clear-token] [--webhook \| --clear-webhook]` | Set the GitHub token (read from stdin) and webhook secret used by auto-deploy (redeploys). |
 | `towline update [--check] [--force]` | Update Towline to the latest release. |
 | `towline promote <name>` | Create prod tier from dev. *(Coming soon)* |
 | `towline rotate-keys <name>` | Rotate API keys. *(Coming soon)* |

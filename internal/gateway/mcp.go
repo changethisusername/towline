@@ -13,6 +13,7 @@ import (
 	"time"
 
 	towlineroot "github.com/changethisusername/towline"
+	"github.com/changethisusername/towline/internal/approval"
 	"github.com/changethisusername/towline/internal/middleware"
 	"github.com/changethisusername/towline/internal/towlinemcp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -30,6 +31,9 @@ const guideTool = "towline_guide"
 type BuiltProject struct {
 	Tools map[string]server.ServerTool
 	Close func()
+	// Approvals is the project's approval token store, which the
+	// auto-deploy watcher uses to follow its own approval requests.
+	Approvals *approval.Store
 }
 
 // ProjectBuilder builds one project's tools.
@@ -73,7 +77,7 @@ func buildProject(g *Gateway, p ProjectConfig) (*BuiltProject, error) {
 	for name, t := range inst.Server.MCPServer().ListTools() {
 		tools[name] = *t
 	}
-	return &BuiltProject{Tools: tools, Close: inst.Close}, nil
+	return &BuiltProject{Tools: tools, Close: inst.Close, Approvals: inst.Store}, nil
 }
 
 // mcpRouter holds the MCP servers: one for /mcp with every project's tools
@@ -423,6 +427,9 @@ func (rt *mcpRouter) guide(conn *Connection, project string) string {
 				fmt.Fprintf(&b, "; allowed external volumes: %s", strings.Join(cp.AllowVolumes, ", "))
 			}
 			b.WriteString(")\n")
+		}
+		if ad := p.AutoDeploy; ad != nil {
+			fmt.Fprintf(&b, "- Auto-deploy: merges to `%s`@`%s` deploy automatically from `%s` (with the owner's approval where the policy needs it); don't redeploy by hand after a merge\n", ad.Repo, ad.Branch, ad.ComposePath)
 		}
 		b.WriteString("\n")
 	}

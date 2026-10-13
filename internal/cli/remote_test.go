@@ -53,7 +53,7 @@ func TestBuildGatewayConfig(t *testing.T) {
 	dirs, err := projectDirs(cfg, nil, true)
 	require.NoError(t, err)
 	rc := &remoteConfig{URL: "https://mcp.example.com", Projects: dirs, OwnerTokenHash: strings.Repeat("ab", 32), TunnelToken: "eyJhIjoidGVzdCJ9tunneltoken00", Approval: gateway.ApprovalAlways}
-	gc, err := buildGatewayConfig(cfg, rc)
+	gc, _, err := buildGatewayConfig(cfg, rc, nil)
 	require.NoError(t, err)
 	require.Len(t, gc.Projects, 2)
 	byName := map[string]gateway.ProjectConfig{}
@@ -71,7 +71,7 @@ func TestBuildGatewayConfig(t *testing.T) {
 		"stack_name": "shop-prod", "tier": "dev",
 		"mcp_args": map[string]any{"token": "ptr_shop"},
 	})
-	_, err = buildGatewayConfig(cfg, rc)
+	_, _, err = buildGatewayConfig(cfg, rc, nil)
 	assert.ErrorContains(t, err, "does not match tier")
 
 	// nor point at another project's stack from its own directory
@@ -79,7 +79,7 @@ func TestBuildGatewayConfig(t *testing.T) {
 		"stack_name": "blog-dev", "tier": "dev",
 		"mcp_args": map[string]any{"token": "ptr_shop"},
 	})
-	_, err = buildGatewayConfig(cfg, rc)
+	_, _, err = buildGatewayConfig(cfg, rc, nil)
 	assert.ErrorContains(t, err, "does not belong")
 }
 

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/changethisusername/towline/pkg/portainer/models"
@@ -12,8 +13,17 @@ import (
 
 // StackUpdatePreparer returns, for an update to newCompose, the stack's
 // current user env and the internal _TOWLINE_* env that must be carried
-// over (including a deployment history entry for this update).
-type StackUpdatePreparer func(newCompose string) (userEnv, internalEnv []models.LocalStackEnvVar, err error)
+// over (including a deployment history entry for this update, recorded
+// with description).
+type StackUpdatePreparer func(newCompose, description string) (userEnv, internalEnv []models.LocalStackEnvVar, err error)
+
+// defaultUpdateDescription is the history entry for an agent's update.
+const defaultUpdateDescription = "Stack updated via updateLocalStack"
+
+var (
+	commitSHAPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	commitEnvNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+)
 
 // NewEnvFilter returns a middleware that strips _TOWLINE_ prefixed environment
 // variables from createLocalStack and updateLocalStack requests. This prevents
@@ -55,13 +65,26 @@ func NewEnvFilter(toolName string, prepare StackUpdatePreparer) MiddlewareFunc {
 			}
 
 			if toolName == "updateLocalStack" && prepare != nil {
+				origin := callerOrigin(ctx)
+				description := defaultUpdateDescription
+				if origin != nil && origin.Summary != "" {
+					description = origin.Summary
+				}
 				file, _ := toolgen.NewParameterParser(request).GetString("file", false)
-				userEnv, internalEnv, err := prepare(file)
+				userEnv, internalEnv, err := prepare(file, description)
 				if err != nil {
 					return mcp.NewToolResultErrorFromErr("failed to read current stack environment", err), nil
 				}
 				if !envProvided {
 					filtered = appendEnv(filtered, userEnv)
+				}
+				if origin != nil && origin.CommitEnv != "" {
+					// Set only in process by the auto-deploy watcher; checked
+					// again here so a bad value can never reach the stack.
+					if !commitEnvNamePattern.MatchString(origin.CommitEnv) || strings.HasPrefix(origin.CommitEnv, "_TOWLINE_") || !commitSHAPattern.MatchString(origin.Commit) {
+						return mcp.NewToolResultError("invalid commit env for this deploy; refused"), nil
+					}
+					filtered = setEnv(filtered, origin.CommitEnv, origin.Commit)
 				}
 				filtered = appendEnv(filtered, internalEnv)
 			} else if !envProvided {
@@ -72,6 +95,20 @@ func NewEnvFilter(toolName string, prepare StackUpdatePreparer) MiddlewareFunc {
 			return next(ctx, request)
 		}
 	}
+}
+
+// setEnv replaces every entry named name with one holding value.
+func setEnv(env []interface{}, name, value string) []interface{} {
+	out := make([]interface{}, 0, len(env)+1)
+	for _, item := range env {
+		if obj, ok := item.(map[string]interface{}); ok {
+			if n, _ := obj["name"].(string); n == name {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	return append(out, map[string]interface{}{"name": name, "value": value})
 }
 
 func appendEnv(dst []interface{}, env []models.LocalStackEnvVar) []interface{} {

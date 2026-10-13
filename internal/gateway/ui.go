@@ -46,6 +46,7 @@ func (u *ownerUI) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/connections/revoke", u.withSession(u.handleRevoke))
 	mux.HandleFunc("POST /ui/pairings/cancel", u.withSession(u.handleCancelPairing))
 	mux.HandleFunc("POST /ui/approvals", u.withSession(u.handleDecide))
+	mux.HandleFunc("POST /ui/autodeploy", u.withSession(u.handleAutoDeploy))
 }
 
 // --- Sessions ---
@@ -178,6 +179,7 @@ type dashboardData struct {
 	Pairings    []Pairing
 	Pending     []approval.Record
 	Recent      []approval.Record
+	AutoDeploy  []autoDeployView
 	// ConnNames maps connection ids to names, for approval requests.
 	ConnNames map[string]string
 	// Nonce is the create form's one-time token.
@@ -241,6 +243,12 @@ func (u *ownerUI) dashboard(s ownerSession, msg string) dashboardData {
 	for _, c := range d.Connections {
 		d.ConnNames[c.ID] = c.Name
 	}
+	for _, p := range u.g.cfg.Projects {
+		if p.AutoDeploy != nil {
+			d.ConnNames[autoDeployCallerPrefix+p.Name] = "auto-deploy (" + p.AutoDeploy.Repo + ")"
+		}
+	}
+	d.AutoDeploy = u.g.autodeploy.views()
 	d.Pairings = u.g.store.Pairings()
 	for _, rec := range u.g.approvals.Records() {
 		if rec.Status == approval.StatusPending {
@@ -343,6 +351,33 @@ func (u *ownerUI) handleDecide(w http.ResponseWriter, r *http.Request, s ownerSe
 		return
 	}
 	u.g.audit.Info().Str("event", "approval_decided").Str("decision", string(status)).Str("request", shortHash(id)).Msg("")
+	// An auto-deploy waiting on this decision acts on it now rather than
+	// at its next poll.
+	for _, rec := range u.g.approvals.Records() {
+		if rec.ID == id {
+			if p, ok := strings.CutPrefix(rec.Client, autoDeployCallerPrefix); ok {
+				u.g.autodeploy.nudgeProject(p)
+			}
+			break
+		}
+	}
+	http.Redirect(w, r, "/ui", http.StatusSeeOther)
+}
+
+// handleAutoDeploy is "Deploy latest now": deploy the branch's current
+// head once, even if it is the baseline or was rejected or failed before.
+// Checks and approvals still apply.
+func (u *ownerUI) handleAutoDeploy(w http.ResponseWriter, r *http.Request, s ownerSession) {
+	project := r.PostForm.Get("project")
+	if !ValidProjectName(project) {
+		u.render(w, http.StatusBadRequest, "dashboard", u.dashboard(s, "Unknown project."))
+		return
+	}
+	if err := u.g.autodeploy.forceLatest(project); err != nil {
+		u.render(w, http.StatusBadRequest, "dashboard", u.dashboard(s, err.Error()))
+		return
+	}
+	u.g.audit.Info().Str("event", "autodeploy").Str("project", project).Str("stage", "owner_requested_latest").Msg("")
 	http.Redirect(w, r, "/ui", http.StatusSeeOther)
 }
 
