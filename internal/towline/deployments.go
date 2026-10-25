@@ -292,12 +292,13 @@ func appendDeploymentEntry(env []models.LocalStackEnvVar, description, previousC
 // calls updateLocalStack. It returns the stack's current user-visible env
 // (used when the agent omits env, so an update does not wipe it) and the
 // internal _TOWLINE_* env with a deployment history entry for this update
-// appended (so an update neither erases nor skips the history).
+// appended under description (so an update neither erases nor skips the
+// history).
 //
 // The read is serialized with the towline tools' read-modify-write cycles.
 // The update itself is performed afterwards by the wrapped upstream handler,
 // outside this lock.
-func (h *Handlers) PrepareStackUpdate(newCompose string) (userEnv, internalEnv []models.LocalStackEnvVar, err error) {
+func (h *Handlers) PrepareStackUpdate(newCompose, description string) (userEnv, internalEnv []models.LocalStackEnvVar, err error) {
 	h.stackMu.Lock()
 	defer h.stackMu.Unlock()
 
@@ -310,7 +311,10 @@ func (h *Handlers) PrepareStackUpdate(newCompose string) (userEnv, internalEnv [
 		return nil, nil, fmt.Errorf("failed to get stack compose file: %w", err)
 	}
 
-	env, err := appendDeploymentEntry(stack.Env, "Stack updated via updateLocalStack", previous, newCompose, "deployed")
+	if description == "" {
+		description = "Stack updated via updateLocalStack"
+	}
+	env, err := appendDeploymentEntry(stack.Env, description, previous, newCompose, "deployed")
 	if err != nil {
 		return nil, nil, err
 	}

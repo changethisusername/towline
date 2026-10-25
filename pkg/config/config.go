@@ -84,6 +84,27 @@ type ProjectConfig struct {
 	// ComposePolicy relaxes the compose security policy for this project.
 	// Edit it (as the human operator) and run 'towline refresh' to apply.
 	ComposePolicy *ComposePolicyConfig `json:"compose_policy,omitempty"`
+	// AutoDeploy deploys merges to a GitHub branch through the remote
+	// gateway. This file is agent-writable, so the gateway only uses a
+	// block the owner accepted with 'towline remote deploy
+	// --accept-auto-deploy'.
+	AutoDeploy *AutoDeployConfig `json:"auto_deploy,omitempty"`
+}
+
+// AutoDeployConfig names the GitHub branch whose new commits the remote
+// gateway deploys to this project's stack.
+type AutoDeployConfig struct {
+	// Repo is "owner/name".
+	Repo string `json:"repo"`
+	// Branch defaults to main.
+	Branch string `json:"branch,omitempty"`
+	// ComposePath is the compose file in the repository (default
+	// docker-compose.yml).
+	ComposePath string `json:"compose_path,omitempty"`
+	// RequireChecks waits for the commit's checks to pass (default true).
+	RequireChecks *bool `json:"require_checks,omitempty"`
+	// CommitEnv, if set, is a stack env var set to the deployed commit SHA.
+	CommitEnv string `json:"commit_env,omitempty"`
 }
 
 // ComposePolicyConfig is a project's compose security policy.

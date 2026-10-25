@@ -55,9 +55,21 @@ type Config struct {
 	// NtfyURL, if set, receives a push notification for each approval
 	// request (action, project and short id only).
 	NtfyURL string `yaml:"ntfy_url,omitempty"`
+	// GitHub holds credentials for auto-deploy (optional).
+	GitHub GitHubConfig `yaml:"github,omitempty"`
 
 	Portainer PortainerConfig `yaml:"portainer"`
 	Projects  []ProjectConfig `yaml:"projects"`
+}
+
+// GitHubConfig holds what auto-deploy uses to talk to GitHub.
+type GitHubConfig struct {
+	// Token is a read-only GitHub token (needed for private repositories
+	// and for higher rate limits). Never logged.
+	Token string `yaml:"token,omitempty"`
+	// WebhookSecret enables POST /hooks/github, which only nudges the
+	// watcher to look at GitHub sooner.
+	WebhookSecret string `yaml:"webhook_secret,omitempty"`
 }
 
 // PortainerConfig says how the gateway reaches Portainer.
@@ -88,6 +100,81 @@ type ProjectConfig struct {
 	ComposePolicy ComposePolicyConfig `yaml:"compose_policy,omitempty"`
 	Proxy         string              `yaml:"proxy,omitempty"`
 	CaddyAPI      string              `yaml:"caddy_api,omitempty"`
+	// AutoDeploy, if set, deploys new commits on a GitHub branch.
+	AutoDeploy *AutoDeployConfig `yaml:"auto_deploy,omitempty"`
+}
+
+// AutoDeployConfig is a project's auto-deploy source.
+type AutoDeployConfig struct {
+	Repo          string `yaml:"repo"`
+	Branch        string `yaml:"branch,omitempty"`
+	ComposePath   string `yaml:"compose_path,omitempty"`
+	RequireChecks *bool  `yaml:"require_checks,omitempty"`
+	CommitEnv     string `yaml:"commit_env,omitempty"`
+}
+
+var (
+	repoPattern        = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
+	branchPattern      = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,100}$`)
+	pathSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	envNamePattern     = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	githubTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,255}$`)
+)
+
+// Validate checks an auto-deploy block and fills in its defaults. Every
+// value ends up in a GitHub API path or the stack's env, so anything
+// unusual is refused rather than escaped.
+func (a *AutoDeployConfig) Validate() error {
+	if !repoPattern.MatchString(a.Repo) {
+		return fmt.Errorf("auto_deploy.repo must be owner/name, got %q", a.Repo)
+	}
+	if _, name, _ := strings.Cut(a.Repo, "/"); name == "." || name == ".." {
+		return fmt.Errorf("auto_deploy.repo %q is not a repository name", a.Repo)
+	}
+	if a.Branch == "" {
+		a.Branch = "main"
+	}
+	b := a.Branch
+	if !branchPattern.MatchString(b) || strings.HasPrefix(b, "-") || strings.HasPrefix(b, "/") ||
+		strings.HasSuffix(b, "/") || strings.Contains(b, "..") || strings.Contains(b, "//") ||
+		strings.HasSuffix(b, ".lock") || strings.HasPrefix(b, "refs/") {
+		return fmt.Errorf("auto_deploy.branch %q is not an allowed branch name", b)
+	}
+	if a.ComposePath == "" {
+		a.ComposePath = "docker-compose.yml"
+	}
+	cp := a.ComposePath
+	if len(cp) > 200 || strings.HasPrefix(cp, "/") || !(strings.HasSuffix(cp, ".yml") || strings.HasSuffix(cp, ".yaml")) {
+		return fmt.Errorf("auto_deploy.compose_path %q must be a relative .yml or .yaml path", cp)
+	}
+	for _, seg := range strings.Split(cp, "/") {
+		if seg == "." || seg == ".." || !pathSegmentPattern.MatchString(seg) {
+			return fmt.Errorf("auto_deploy.compose_path %q is not an allowed path", cp)
+		}
+	}
+	if a.RequireChecks == nil {
+		t := true
+		a.RequireChecks = &t
+	}
+	if a.CommitEnv != "" && (!envNamePattern.MatchString(a.CommitEnv) || strings.HasPrefix(a.CommitEnv, "_TOWLINE_")) {
+		return fmt.Errorf("auto_deploy.commit_env %q must be an upper-case env var name (not _TOWLINE_*)", a.CommitEnv)
+	}
+	return nil
+}
+
+// ChecksRequired reports whether deploys wait for passing checks (the
+// default).
+func (a AutoDeployConfig) ChecksRequired() bool {
+	return a.RequireChecks == nil || *a.RequireChecks
+}
+
+// Fingerprint identifies where the block deploys from: repository,
+// branch and compose path. A change to any of them starts the watcher over
+// from a new baseline. (Owner acceptance, done by the CLI, covers every
+// field and the compose policy.) Call it after Validate so that defaults
+// are filled in.
+func (a AutoDeployConfig) Fingerprint() string {
+	return strings.Join([]string{a.Repo, a.Branch, a.ComposePath}, "|")
 }
 
 // ComposePolicyConfig mirrors the project's compose policy.
@@ -201,6 +288,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if s := c.GitHub.WebhookSecret; s != "" && len(s) < 32 {
+		return errors.New("github.webhook_secret must be at least 32 characters")
+	}
+	if t := c.GitHub.Token; t != "" && !githubTokenPattern.MatchString(t) {
+		// The value is never echoed: it is a credential.
+		return errors.New("github.token is not a GitHub token (letters, digits and underscores, at most 255)")
+	}
+
 	if pu, err := url.Parse(c.Portainer.URL); err != nil || pu.Host == "" || (pu.Scheme != "https" && pu.Scheme != "http") {
 		return errors.New("portainer.url must be an http(s) URL")
 	}
@@ -248,6 +343,11 @@ func (c *Config) Validate() error {
 		case "", "traefik", "caddy", "cloudflare":
 		default:
 			return fmt.Errorf("project %q: proxy must be traefik, caddy or cloudflare", p.Name)
+		}
+		if p.AutoDeploy != nil {
+			if err := p.AutoDeploy.Validate(); err != nil {
+				return fmt.Errorf("project %q: %w", p.Name, err)
+			}
 		}
 	}
 	return nil

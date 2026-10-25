@@ -40,6 +40,11 @@ const (
 // TokenTTL. The webhook API reports them as rejected so the MCP stops.
 const StatusExpired Status = "expired"
 
+// StatusWithdrawn is shown for requests withdrawn by whoever asked, because
+// a newer request replaced them (the gateway's auto-deploy watcher, when a
+// newer commit arrives). The webhook API reports them as rejected.
+const StatusWithdrawn Status = "superseded"
+
 // ServerConfig configures the approval server.
 type ServerConfig struct {
 	// WebhookToken authenticates towline-mcp (submit requests, poll status).
@@ -242,7 +247,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown request")
 		return
 	}
-	if status == StatusExpired {
+	if status == StatusExpired || status == StatusWithdrawn {
 		status = StatusRejected
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": string(status)})
@@ -289,7 +294,8 @@ func (s *Server) Submit(_ context.Context, req Request) error {
 	return s.submit(req)
 }
 
-// Status reports a request's decision; expired requests read as rejected.
+// Status reports a request's decision; expired and withdrawn requests read
+// as rejected.
 func (s *Server) Status(_ context.Context, id string) (Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,10 +305,28 @@ func (s *Server) Status(_ context.Context, id string) (Status, error) {
 		return "", errors.New("unknown approval request")
 	}
 	status := s.effectiveStatusLocked(rec)
-	if status == StatusExpired {
+	if status == StatusExpired || status == StatusWithdrawn {
 		status = StatusRejected
 	}
 	return status, nil
+}
+
+// Withdraw marks a pending request as superseded, so it can no longer be
+// approved. Only in-process callers that submitted the request use it.
+func (s *Server) Withdraw(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[id]
+	if !ok {
+		return errors.New("unknown request")
+	}
+	if current := s.effectiveStatusLocked(rec); current != StatusPending {
+		return fmt.Errorf("request is already %s", current)
+	}
+	rec.Status = StatusWithdrawn
+	rec.DecidedAt = s.now()
+	log.Printf("approval withdrawn: %s on %s (id %s)", rec.Action, rec.Project, shortID(id))
+	return nil
 }
 
 // Records returns every known request, newest first.
@@ -598,7 +622,7 @@ button { font:inherit; border-radius:8px; border:1px solid var(--line); backgrou
 button.approve { background:var(--ok); border-color:var(--ok); color:#fff; } button.reject { color:var(--no); border-color:var(--no); }
 input[type=password] { font:inherit; width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); }
 .msg { padding:10px 12px; border-radius:8px; border:1px solid var(--no); color:var(--no); margin:12px 0; }
-.status-approved { color:var(--ok); } .status-rejected, .status-expired { color:var(--no); }
+.status-approved { color:var(--ok); } .status-rejected, .status-expired { color:var(--no); } .status-superseded { color:var(--muted); }
 header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 </style>
 </head>

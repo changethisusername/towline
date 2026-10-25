@@ -34,6 +34,27 @@ type Caller struct {
 	// ID names the client (a client token's name or an OAuth client id).
 	ID    string
 	Scope Scope
+	// Origin is set only by the gateway's own auto-deploy watcher, in
+	// process. Remote clients and tool arguments can never set it.
+	Origin *DeployOrigin
+}
+
+// DeployOrigin describes where an automatic deploy came from.
+type DeployOrigin struct {
+	// Summary is one line for the deployment history.
+	Summary string
+	// Details is shown to the approver above the arguments.
+	Details string
+	// Commit is the full commit SHA being deployed.
+	Commit string
+	// CommitEnv, if set, is a stack env var set to Commit.
+	CommitEnv string
+}
+
+// callerOrigin is the caller's deploy origin, or nil.
+func callerOrigin(ctx context.Context) *DeployOrigin {
+	c, _ := CallerFromContext(ctx)
+	return c.Origin
 }
 
 type callerKey struct{}

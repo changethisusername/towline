@@ -42,13 +42,17 @@ type Gateway struct {
 	approvals *approval.Server
 	mcp       *mcpRouter
 	ui        *ownerUI
-	limiter   *rateLimiter
-	audit     zerolog.Logger
-	publicURL *url.URL
-	now       func() time.Time
+	// autodeploy is nil unless a project has auto-deploy.
+	autodeploy *autoDeployer
+	limiter    *rateLimiter
+	audit      zerolog.Logger
+	publicURL  *url.URL
+	now        func() time.Time
 
 	authzMu  sync.Mutex
 	authzReq map[string]*authzRequest
+
+	closeOnce sync.Once
 }
 
 // Options configures New.
@@ -57,6 +61,15 @@ type Options struct {
 	Builder ProjectBuilder
 	// Audit receives audit events; nil logs to stdout.
 	Audit *zerolog.Logger
+
+	// Test seams for auto-deploy: the GitHub client (production always
+	// uses githubAPI), the poll interval, and not starting the watcher's
+	// goroutines (tests drive it step by step).
+	github           *githubClient
+	pollInterval     time.Duration
+	manualAutoDeploy bool
+	firstCheckNow    bool
+	noSettle         bool
 }
 
 // New creates a gateway from a validated config.
@@ -110,12 +123,53 @@ func New(cfg *Config, opts Options) (*Gateway, error) {
 	}
 	g.mcp = router
 	g.ui = newOwnerUI(g)
+
+	// Auto-deploy: forget the progress of projects that no longer use it,
+	// and watch the ones that do.
+	var watched []string
+	for _, p := range cfg.Projects {
+		if p.AutoDeploy != nil {
+			watched = append(watched, p.Name)
+		}
+	}
+	if err := store.PruneAutoDeploy(watched); err != nil {
+		router.close()
+		return nil, err
+	}
+	if len(watched) > 0 {
+		gh := opts.github
+		if gh == nil {
+			gh = newGitHubClient(githubAPI, cfg.GitHub.Token)
+		}
+		interval := opts.pollInterval
+		if interval <= 0 {
+			interval = pollWithoutToken
+			if cfg.GitHub.Token != "" {
+				interval = pollWithToken
+			}
+		}
+		g.autodeploy = newAutoDeployer(g, gh, interval)
+		if opts.noSettle {
+			g.autodeploy.settle = 0
+		}
+		if opts.firstCheckNow {
+			g.autodeploy.firstDelay = func() time.Duration { return 0 }
+		}
+		if !opts.manualAutoDeploy {
+			g.autodeploy.start()
+		}
+	}
 	return g, nil
 }
 
 // Close stops background work.
 func (g *Gateway) Close() {
-	g.mcp.close()
+	g.closeOnce.Do(func() {
+		if g.autodeploy != nil {
+			g.autodeploy.close()
+		}
+		g.mcp.close()
+	})
 }
 
 // Handler returns the gateway's HTTP handler.
@@ -143,6 +197,9 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /oauth/authorize", g.handleConsent)
 	mux.HandleFunc("POST /oauth/token", g.handleToken)
 	mux.HandleFunc("POST /oauth/revoke", g.handleRevoke)
+
+	// GitHub webhook (auto-deploy nudges; 404 unless configured)
+	mux.HandleFunc("POST /hooks/github", g.handleGitHubHook)
 
 	// Owner UI
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
